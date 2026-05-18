@@ -440,17 +440,38 @@ export class ContextAnalyzer {
       sum + (f.functions?.reduce((s2: number, fn: any) => s2 + (fn.dataFlow?.length || 0), 0) || 0), 0) || 0;
     console.log(chalk.gray(`    Found: ${fileCount} files, ${entryPoints} entry points, ${dataFlows} data flows`));
 
-    // Phase 3: Execute custom analysis strategies SEQUENTIALLY
-    const results: any[] = [];
-    const analysisTypes: string[] = [];
+    // Phase 3: Execute custom analysis strategies WITH BOUNDED CONCURRENCY.
+    // Strategies are independent (the planner runs once before them and they
+    // don't read each other's findings), so several can run at once. Each is
+    // dominated by Claude latency (30-90s/call); concurrency=4 cuts a
+    // 7-strategy chunk from ~7× to ~2× round-trips.
+    //
+    // Override via SANDYAA_STRATEGY_CONCURRENCY (1..8). Set 1 for strict
+    // rate limits — that reproduces the old sequential behavior exactly.
+    const STRATEGY_CONCURRENCY = (() => {
+      const raw = parseInt(process.env.SANDYAA_STRATEGY_CONCURRENCY || '', 10);
+      if (Number.isFinite(raw) && raw >= 1 && raw <= 8) return raw;
+      return 4;
+    })();
 
-    // Execute each custom strategy designed by Claude
-    for (const strategy of plan.analyses) {
-      console.log(chalk.gray(`  → ${strategy.name}`));
-      console.log(chalk.gray(`    ${strategy.description.substring(0, 80)}...`));
+    type StrategyOutcome = {
+      name: string;
+      result: any | null;
+      tokensUsed: number;
+      log: string[];
+    };
+
+    // Run one strategy. Output is buffered into the returned outcome and
+    // flushed by the caller in completion order, so concurrent strategies
+    // don't interleave into illegible output.
+    const runStrategy = async (strategy: any): Promise<StrategyOutcome> => {
+      const log: string[] = [];
+      const push = (s: string) => log.push(s);
+
+      push(chalk.gray(`  → ${strategy.name}`));
+      push(chalk.gray(`    ${strategy.description.substring(0, 80)}...`));
 
       // Resolve target files using PathResolver (handles both absolute and relative paths)
-      let strategyFiles = validFiles;
       let strategyFilesRelative = validRelativeFiles;
 
       if (strategy.targetFiles && strategy.targetFiles.length > 0) {
@@ -460,17 +481,17 @@ export class ContextAnalyzer {
         // `src/**/*.ts` file — a fatal false positive on any TypeScript
         // target (e.g. umami, Next.js apps), since legitimate target
         // files like `src/lib/auth.ts` were rejected as "Sandyaa's code".
-        const validTargetFiles = strategy.targetFiles.filter(tf => {
+        const validTargetFiles = strategy.targetFiles.filter((tf: string) => {
           const absolute = this.pathResolver.toAbsolute(tf);
           if (!this.isWithinTargetBoundary(absolute)) {
-            console.log(chalk.red(`    [REJECTED] path escapes target or hits Sandyaa: ${tf}`));
+            push(chalk.red(`    [REJECTED] path escapes target or hits Sandyaa: ${tf}`));
             return false;
           }
           return true;
         });
 
         if (validTargetFiles.length === 0) {
-          console.log(chalk.red(`    [ERROR] ALL target files were out-of-boundary — falling back to chunk file list`));
+          push(chalk.red(`    [ERROR] ALL target files were out-of-boundary — falling back to chunk file list`));
         }
 
         // Claude often returns paths without full prefixes (e.g., "airflow/models/dagbag.py" instead of "airflow-core/src/airflow/models/dagbag.py")
@@ -498,10 +519,9 @@ export class ContextAnalyzer {
         }
 
         if (matchedFiles.length > 0) {
-          strategyFiles = matchedFiles;
           strategyFilesRelative = matchedFiles.map(f => this.pathResolver.toRelative(f));
         } else {
-          console.log(chalk.yellow(`    ⚠ Target files don't exist, using original file list instead`));
+          push(chalk.yellow(`    ⚠ Target files don't exist, using original file list instead`));
         }
       }
 
@@ -518,14 +538,13 @@ export class ContextAnalyzer {
         maxTokens: 16000
       });
 
-      if (strategyResult.success && strategyResult.output) {
-        results.push(strategyResult.output);
-        analysisTypes.push(strategy.name);
+      const tokensUsed = strategyResult.tokensUsed || 0;
 
+      if (strategyResult.success && strategyResult.output) {
         // Show what was found
         const issues = strategyResult.output.issues || strategyResult.output.vulnerabilities || [];
         if (issues.length > 0) {
-          console.log(chalk.yellow(`    Found ${issues.length} issue${issues.length !== 1 ? 's' : ''}:`));
+          push(chalk.yellow(`    Found ${issues.length} issue${issues.length !== 1 ? 's' : ''}:`));
 
           // Show first 3 issues with type and location
           const samplesToShow = Math.min(3, issues.length);
@@ -537,21 +556,49 @@ export class ContextAnalyzer {
               : 'unknown location';
             const severity = issue.severity ? `[${issue.severity.toUpperCase()}]` : '';
 
-            console.log(chalk.gray(`      ${severity} ${issueType} at ${location}`));
+            push(chalk.gray(`      ${severity} ${issueType} at ${location}`));
           }
 
           if (issues.length > 3) {
-            console.log(chalk.gray(`      ... and ${issues.length - 3} more`));
+            push(chalk.gray(`      ... and ${issues.length - 3} more`));
           }
         } else {
-          console.log(chalk.gray(`    No issues detected`));
+          push(chalk.gray(`    No issues detected`));
         }
-      } else {
-        console.log(chalk.yellow(`    Analysis failed: ${strategyResult.error}`));
+        return { name: strategy.name, result: strategyResult.output, tokensUsed, log };
       }
 
-      totalTokens += strategyResult.tokensUsed || 0;
-    }
+      push(chalk.yellow(`    Analysis failed: ${strategyResult.error}`));
+      return { name: strategy.name, result: null, tokensUsed, log };
+    };
+
+    // Bounded-concurrency runner. Workers pull from a shared cursor over
+    // plan.analyses; each completed strategy's buffered log flushes
+    // immediately (in completion order) so progress stays visible.
+    console.log(chalk.gray(
+      `  Running ${plan.analyses.length} strateg${plan.analyses.length === 1 ? 'y' : 'ies'} with concurrency=${STRATEGY_CONCURRENCY}...`
+    ));
+
+    const results: any[] = [];
+    const analysisTypes: string[] = [];
+    let cursor = 0;
+
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const idx = cursor++;
+        if (idx >= plan.analyses.length) return;
+        const outcome = await runStrategy(plan.analyses[idx]);
+        for (const line of outcome.log) console.log(line);
+        totalTokens += outcome.tokensUsed;
+        if (outcome.result !== null) {
+          results.push(outcome.result);
+          analysisTypes.push(outcome.name);
+        }
+      }
+    };
+
+    const workerCount = Math.min(STRATEGY_CONCURRENCY, plan.analyses.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
     // Still run git history analysis if it's a git repo (universal)
     // BUT skip for large repos (>5000 files) to avoid timeout issues

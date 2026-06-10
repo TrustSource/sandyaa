@@ -33,12 +33,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ssk/sandyaa.git"
+    "url": "https://github.com/trustsource/sandyaa.git"
   },
   "bugs": {
-    "url": "https://github.com/ssk/sandyaa/issues"
+    "url": "https://github.com/trustsource/sandyaa/issues"
   },
-  "homepage": "https://github.com/ssk/sandyaa#readme",
+  "homepage": "https://github.com/trustsource/sandyaa#readme",
   "engines": {
     "node": ">=18"
   },

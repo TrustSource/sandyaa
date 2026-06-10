@@ -8,7 +8,7 @@ import chalk from 'chalk';
 const SARIF_SCHEMA = 'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json';
 const TOOL_NAME = 'Sandyaa';
 const TOOL_VERSION = '1.0.0';
-const TOOL_INFO_URI = 'https://github.com/ssk/sandyaa';
+const TOOL_INFO_URI = 'https://github.com/trustsource/sandyaa';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

@@ -317,330 +317,16 @@ export class Orchestrator {
 
     while (i < filesToProcess.length) {
       iteration++;
-
-      // Get dynamic chunk size based on learned metrics
       const chunkSize = this.dynamicChunker.getChunkSize();
       const chunk = filesToProcess.slice(i, i + chunkSize);
       const remainingFiles = filesToProcess.length - i;
       const estimatedChunksRemaining = Math.ceil(remainingFiles / chunkSize);
 
-      console.log(chalk.bold(`\n[${phase}] Chunk ${iteration} (${chunk.length} files | ~${estimatedChunksRemaining} chunks remaining)`));
-      console.log(chalk.gray(`  ${this.dynamicChunker.getExplanation()}`));
-
-      // Update dashboard
-      this.dashboard.update({
-        phase: 'chunking',
-        progress: { current: iteration, total: Math.ceil(filesToProcess.length / chunkSize) },
-        currentFile: chunk[0] ? path.basename(chunk[0]) : '',
-      });
-      this.dashboard.addActivity(`Chunk ${iteration}: analyzing ${chunk.length} files`);
-
-      const chunkStartTime = Date.now();
-
-      // Phase 1: Deep Context Building with intelligent planning
-      process.stdout.write(chalk.cyan(`  Planning: examining ${chunk.length} files... `));
-
-      const contextResult = await this.analyzer.analyze(chunk);
-      const context = contextResult.context || contextResult;
-      const contextTokens = contextResult.tokensUsed || 0;
-      this.totalTokensUsed += contextTokens;
-      this.tokensByPhase.set('context-building', (this.tokensByPhase.get('context-building') || 0) + contextTokens);
-
-      const contextWindowPercent = ((this.totalTokensUsed / getDefaultContextWindow()) * 100).toFixed(1);
-
-      // Clear line and show completion
-      process.stdout.write('\r' + ' '.repeat(80) + '\r');
-      console.log(chalk.green(
-        `✓ Analysis planned & context built: ${context.files.length} components | ` +
-        `${contextTokens.toLocaleString()} tokens (${contextWindowPercent}% of ${(getDefaultContextWindow() / 1000).toFixed(0)}k)`
-      ));
-
-      // Phase 2: Vulnerability Detection
-      console.log(chalk.cyan(`\n  → Vulnerability detection: correlating findings and analyzing exploitability...`));
-      const detectionStartTokens = this.totalTokensUsed;
-      let vulnerabilities = await this.detector.detect(context);
-      const detectionTokens = this.totalTokensUsed - detectionStartTokens;
-
-      // Update dashboard with detection results
-      this.dashboard.update({
-        phase: 'vulnerability-detection',
-        tokensUsed: this.totalTokensUsed,
-      });
-
-      if (vulnerabilities.length > 0) {
-        console.log(chalk.green(`    ✓ Found ${vulnerabilities.length} potential vulnerabilities | ${detectionTokens.toLocaleString()} tokens`));
-
-        // Feed findings to dashboard
-        for (const v of vulnerabilities) {
-          const sev = (v.severity?.toLowerCase() || 'low') as 'critical' | 'high' | 'medium' | 'low';
-          this.dashboard.addFinding(sev, `${v.type} at ${v.location?.file?.split('/').pop() || 'unknown'}`);
-        }
-
-        // Show sample of what was found (Claude decides what's important)
-        const sample = vulnerabilities.slice(0, 3);
-        for (const vuln of sample) {
-          const severity = vuln.severity?.toUpperCase() || 'UNKNOWN';
-          const severityColor = ['critical', 'high'].includes(vuln.severity?.toLowerCase() || '') ? chalk.red : chalk.yellow;
-          const attackerNote = vuln.attackerControlled?.isControlled ? 'VERIFIED ' : '';
-          console.log(severityColor(`      ${attackerNote}[${severity}] ${vuln.type} at ${vuln.location.file.split('/').pop()}:${vuln.location.line}`));
-        }
-        if (vulnerabilities.length > 3) {
-          console.log(chalk.gray(`      ... and ${vulnerabilities.length - 3} more`));
-        }
-      } else {
-        console.log(chalk.gray(`    ✓ No vulnerabilities in this chunk | ${detectionTokens.toLocaleString()} tokens`));
-      }
-
-      // Phase 2.5: Recursive Analysis (if enabled)
-      if (this.config.recursive.enabled && vulnerabilities.length > 0) {
-        this.dashboard.update({ phase: 'validation' });
-        console.log(chalk.cyan(`\n  → Recursive verification: tracing call chains, checking contradictions...`));
-        const recursiveStartTokens = this.totalTokensUsed;
-        const enhanced = await this.recursiveEngine.apply(vulnerabilities, context);
-        const recursiveTokens = this.totalTokensUsed - recursiveStartTokens;
-
-        // Count verification statuses instead of filtering
-        const verified = enhanced.filter(v => v.verificationStatus === 'verified' || !v.verificationStatus).length;
-        const uncertain = enhanced.filter(v => v.verificationStatus === 'uncertain').length;
-        const contradicted = enhanced.filter(v => v.verificationStatus === 'contradicted').length;
-        const needsReview = enhanced.filter(v => v.needsManualReview).length;
-
-        vulnerabilities = enhanced; // Keep ALL findings
-
-        // Show verification breakdown
-        if (verified === enhanced.length) {
-          console.log(chalk.green(`    ✓ All ${enhanced.length} findings verified as exploitable | ${recursiveTokens.toLocaleString()} tokens`));
-        } else {
-          console.log(chalk.yellow(`    ✓ Verification complete: ${verified} verified, ${uncertain} uncertain, ${contradicted} contradicted | ${recursiveTokens.toLocaleString()} tokens`));
-          if (needsReview > 0) {
-            console.log(chalk.cyan(`      → ${needsReview} finding${needsReview > 1 ? 's' : ''} flagged for manual review`));
-          }
-        }
-      }
-
-      // Phase 2.6: Regression Detection
-      if (vulnerabilities.length > 0) {
-        process.stdout.write(chalk.cyan(`  Checking git history... `));
-        const regressions = await this.regressionDetector.detectRegressions(
-          targetPath,
-          vulnerabilities
-        );
-
-        process.stdout.write('\r' + ' '.repeat(80) + '\r');
-        if (regressions.length > 0) {
-          console.log(chalk.yellow(`⚠ Found ${regressions.length} regressions (previously fixed bugs)`));
-
-          // Attach regression info to vulnerabilities
-          for (const regression of regressions) {
-            regression.vulnerability.regression = {
-              originalFix: regression.originalFix.commit,
-              similarity: regression.similarity,
-              type: regression.type
-            };
-          }
-        } else {
-          console.log(chalk.gray(`✓ No regressions found`));
-        }
-      }
-
-      // Phase 2.7: Blast Radius Calculation
-      if (vulnerabilities.length > 0) {
-        console.log(chalk.cyan(`  Mapping blast radius for ${vulnerabilities.length} vulnerabilit${vulnerabilities.length !== 1 ? 'ies' : 'y'}...`));
-
-        for (let i = 0; i < vulnerabilities.length; i++) {
-          const vuln = vulnerabilities[i];
-          process.stdout.write(chalk.hex('#FF8C00')(`\r    ⚡ Analyzing impact ${i + 1}/${vulnerabilities.length}: ${vuln.id}...`));
-
-          const blastRadius = await this.blastRadiusCalc.calculateBlastRadius(
-            vuln,
-            context,
-            targetPath
-          );
-
-          vuln.blastRadius = blastRadius;
-
-          // Show result for this vulnerability
-          process.stdout.write('\r' + ' '.repeat(100) + '\r');
-          console.log(chalk.gray(`      ${vuln.id}: ${blastRadius.callSiteCount} call site${blastRadius.callSiteCount !== 1 ? 's' : ''}`));
-        }
-
-        const totalCallSites = vulnerabilities.reduce((sum, v) => sum + (v.blastRadius?.callSiteCount || 0), 0);
-        console.log(chalk.gray(`    ✓ Impact mapped: ${totalCallSites} total call sites affected`));
-      }
-
-      if (vulnerabilities.length > 0) {
-        // Phase 3: POC Generation + Validation
-        this.dashboard.update({ phase: 'poc-generation' });
-        console.log(chalk.cyan(`  Generating and validating POCs for ${vulnerabilities.length} vulnerabilit${vulnerabilities.length !== 1 ? 'ies' : 'y'}...`));
-        const allFindings: any[] = [];  // KEEP EVERYTHING
-
-        for (let i = 0; i < vulnerabilities.length; i++) {
-          const vuln = vulnerabilities[i];
-
-          if (this.config.poc.generate) {
-            try {
-              process.stdout.write(chalk.hex('#FF8C00')(`\r    ⚡ POC ${i + 1}/${vulnerabilities.length}: Generating for ${vuln.id}...`));
-              const poc = await this.pocGen.generate(vuln, context);
-
-              // Anti-hallucination: Validate POC actually works
-              if (this.config.poc.validate) {
-                process.stdout.write(chalk.hex('#FF8C00')(`\r    ⚡ POC ${i + 1}/${vulnerabilities.length}: Validating ${vuln.id}...          `));
-                const isValid = await this.pocGen.validate(poc);
-                if (isValid) {
-                  vuln.poc = poc;
-                  vuln.poc.validated = true;
-                  process.stdout.write('\r' + ' '.repeat(100) + '\r');
-                  console.log(chalk.green(`      ✓ ${vuln.id}: POC validated`));
-                } else {
-                  // POC didn't work - KEEP THE FINDING but mark it
-                  vuln.poc = poc;
-                  vuln.poc.validated = false;
-                  vuln.needsManualReview = true;
-                  if (!vuln.verificationStatus) {
-                    vuln.verificationStatus = 'unverified';
-                  }
-                  process.stdout.write('\r' + ' '.repeat(100) + '\r');
-                  console.log(chalk.yellow(`      ⚠ ${vuln.id}: POC validation failed - marked for manual review`));
-                }
-              } else {
-                // Validation skipped
-                vuln.poc = poc;
-                vuln.poc.validated = false;
-                process.stdout.write('\r' + ' '.repeat(100) + '\r');
-                console.log(chalk.gray(`      ${vuln.id}: POC generated (validation skipped)`));
-              }
-            } catch (error) {
-              // POC generation failed - STILL KEEP THE FINDING
-              process.stdout.write('\r' + ' '.repeat(100) + '\r');
-              console.log(chalk.yellow(`      ⚠ ${vuln.id}: POC generation failed, reported without POC`));
-              vuln.needsManualReview = true;
-            }
-          }
-
-          // ALWAYS add to findings list - NEVER discard
-          allFindings.push(vuln);
-          hooks.emit(HookType.FindingDetected, vuln);
-        }
-
-        // Count findings by status
-        const validated = allFindings.filter(v => v.poc?.validated === true).length;
-        const unvalidated = allFindings.filter(v => v.poc && v.poc.validated === false).length;
-        const noPOC = allFindings.filter(v => !v.poc).length;
-        const highSeverity = allFindings.filter(v => v.severity === 'critical' || v.severity === 'high').length;
-
-        if (highSeverity > 0) {
-          console.log(chalk.red(`    ✓ Collected ${allFindings.length} findings (${highSeverity} HIGH/CRITICAL) - ${validated} validated, ${unvalidated} unvalidated, ${noPOC} no POC`));
-        } else {
-          console.log(chalk.green(`    ✓ Collected ${allFindings.length} findings - ${validated} validated, ${unvalidated} unvalidated, ${noPOC} no POC`));
-        }
-        totalBugsFound += allFindings.length;
-
-        // Phase 4: Report Generation - REPORT EVERYTHING
-        if (allFindings.length > 0) {
-          await this.reporter.report(allFindings);
-
-          // Show breakdown
-          const verifiedCount = allFindings.filter(v =>
-            v.verificationStatus === 'verified' ||
-            (!v.verificationStatus && v.poc?.validated === true)
-          ).length;
-          const uncertainCount = allFindings.filter(v =>
-            v.verificationStatus === 'uncertain' ||
-            v.poc?.validated === false
-          ).length;
-          const contradictedCount = allFindings.filter(v =>
-            v.verificationStatus === 'contradicted'
-          ).length;
-
-          console.log(chalk.green.bold(`\n${allFindings.length} findings documented:`));
-          console.log(chalk.green(`  ✓ ${verifiedCount} verified`));
-          console.log(chalk.yellow(`  ⚠ ${uncertainCount} uncertain/unvalidated`));
-          console.log(chalk.red(`  ✗ ${contradictedCount} contradicted`));
-          console.log();
-
-          // IMMEDIATE CHECKPOINT: Save findings count right after writing to disk
-          // This prevents loss if process crashes before main checkpoint
-          chunk.forEach(f => processedFiles.add(f));
-
-          // Mark files in attack paths (tracks for metrics/debugging)
-          // Note: Recursive strategies can already read these files as needed
-          // This tracking helps identify which files are frequently part of attack chains
-          for (const finding of allFindings) {
-            const attackPathFiles = this.extractAttackPathFiles(finding);
-            for (const file of attackPathFiles) {
-              await this.checkpoint.markAttackPathFile(file, finding.id);
-            }
-          }
-
-          await this.checkpoint.save({
-            targetPath,
-            processedFiles: Array.from(processedFiles),
-            totalBugsFound,
-            timestamp: Date.now()
-          });
-          console.log(chalk.gray(`    → Checkpoint saved (${allFindings.length} findings secured)`));
-
-          // Update planner with learnings from validated bugs (for next chunk's planning)
-          const successfulStrategies = context.files
-            .filter((f: any) => allFindings.some((v: any) => v.location.file.includes(f.path)))
-            .map((f: any) => f.analysisStrategy)
-            .filter(Boolean);
-
-          this.analyzer.updateLearnings({
-            vulnerabilities: allFindings,
-            successfulStrategies: successfulStrategies.length > 0 ? successfulStrategies : undefined
-          });
-
-          console.log(chalk.cyan(`    → Planner updated with ${allFindings.length} new finding${allFindings.length !== 1 ? 's' : ''} for next chunk`));
-        }
-      } else {
-        // No vulnerabilities found, still mark files as processed
-        chunk.forEach(f => processedFiles.add(f));
-
-        // Save checkpoint even when no bugs found
-        await this.checkpoint.save({
-          targetPath,
-          processedFiles: Array.from(processedFiles),
-          totalBugsFound,
-          timestamp: Date.now()
-        });
-      }
-
-      // Update dynamic chunker metrics
-      const chunkTime = Date.now() - chunkStartTime;
-      await this.dynamicChunker.updateMetrics(
-        chunk,
-        contextTokens + (detectionTokens || 0),
-        this.totalTokensUsed,
-        chunkTime
+      const { bugsFound } = await this.processChunk(
+        chunk, iteration, phase, targetPath, processedFiles, totalBugsFound,
+        estimatedChunksRemaining, files.length
       );
-
-      // Show chunk summary with cumulative stats
-      const contextPercent = ((this.totalTokensUsed / getDefaultContextWindow()) * 100).toFixed(1);
-      const chunkTimeMin = (chunkTime / 60000).toFixed(1);
-      const bugsThisChunk = vulnerabilities.filter(v => v.poc?.validated).length;
-
-      console.log(chalk.bold.cyan(
-        `\n━━━ Chunk ${iteration} Summary ━━━`
-      ));
-      console.log(chalk.gray(
-        `  Time: ${chunkTimeMin} min | ` +
-        `Files analyzed: ${chunk.length} | ` +
-        `Bugs found: ${bugsThisChunk}`
-      ));
-      console.log(chalk.gray(
-        `  Progress: ${processedFiles.size}/${files.length} files (${((processedFiles.size/files.length)*100).toFixed(1)}%) | ` +
-        `Total bugs: ${totalBugsFound} | ` +
-        `Context: ${contextPercent}% of 200k`
-      ));
-
-      // Show next chunk size reasoning
-      const nextSize = this.dynamicChunker.getChunkSize();
-      console.log(chalk.gray(
-        `  Next chunk: ${nextSize} files (${this.dynamicChunker.getExplanation()})`
-      ));
-
-      // Move to next chunk
+      totalBugsFound += bugsFound;
       i += chunk.length;
     }
 
@@ -672,7 +358,6 @@ export class Orchestrator {
           phase = 'systematic';
           console.log(chalk.green('Starting systematic coverage...\n'));
 
-          // Continue analysis with dynamic chunking
           let j = 0;
           while (j < remaining.length) {
             iteration++;
@@ -681,66 +366,11 @@ export class Orchestrator {
             const remainingFiles = remaining.length - j;
             const estimatedChunksRemaining = Math.ceil(remainingFiles / chunkSize);
 
-            console.log(chalk.bold(`\n[systematic] Chunk ${iteration} (${chunk.length} files | ~${estimatedChunksRemaining} chunks remaining)`));
-            console.log(chalk.gray(`  ${this.dynamicChunker.getExplanation()}`));
-
-            const chunkStartTime = Date.now();
-
-            // Same analysis pipeline as before...
-            process.stdout.write(chalk.hex('#FF8C00')(`⚡ Analyzing ${chunk.length} files...`));
-            const contextResult = await this.analyzer.analyze(chunk);
-            const context = contextResult.context || contextResult;
-            const contextTokens = contextResult.tokensUsed || 0;
-            this.totalTokensUsed += contextTokens;
-            this.tokensByPhase.set('context-building', (this.tokensByPhase.get('context-building') || 0) + contextTokens);
-
-            const contextWindowPercent = ((this.totalTokensUsed / getDefaultContextWindow()) * 100).toFixed(1);
-            process.stdout.write('\r' + ' '.repeat(80) + '\r');
-            console.log(chalk.green(`✓ Analyzed ${chunk.length} files, mapped ${context.files.length} components [${contextTokens.toLocaleString()} tokens | ${contextWindowPercent}% context]`));
-
-            // Continue with detection, recursive, etc... (copy from above)
-            console.log(chalk.hex('#FF8C00')(`⚡ Detecting vulnerabilities...`));
-            const detectionStartTokens = this.totalTokensUsed;
-            let vulnerabilities = await this.detector.detect(context);
-            const detectionTokens = this.totalTokensUsed - detectionStartTokens;
-
-            if (vulnerabilities.length > 0) {
-              console.log(chalk.green(`  ✓ Found ${vulnerabilities.length} potential vulnerabilities [${detectionTokens.toLocaleString()} tokens]`));
-            } else {
-              console.log(chalk.gray(`  ✓ No vulnerabilities in this chunk [${detectionTokens.toLocaleString()} tokens]`));
-            }
-
-            // Update processed files
-            chunk.forEach(f => processedFiles.add(f));
-
-            // Update dynamic chunker metrics
-            const systematicChunkTime = Date.now() - chunkStartTime;
-            await this.dynamicChunker.updateMetrics(
-              chunk,
-              contextTokens + detectionTokens,
-              this.totalTokensUsed,
-              systematicChunkTime
+            const { bugsFound } = await this.processChunk(
+              chunk, iteration, 'systematic', targetPath, processedFiles, totalBugsFound,
+              estimatedChunksRemaining, files.length
             );
-
-            // Show chunk summary
-            const contextPercent = ((this.totalTokensUsed / getDefaultContextWindow()) * 100).toFixed(1);
-            const chunkTimeMin = (systematicChunkTime / 60000).toFixed(1);
-            console.log(chalk.cyan(
-              `\nChunk ${iteration} complete (${chunkTimeMin} min) | ` +
-              `Files: ${processedFiles.size}/${files.length} | ` +
-              `Bugs: ${totalBugsFound} | ` +
-              `Tokens: ${this.totalTokensUsed.toLocaleString()} (${contextPercent}% of ${(getDefaultContextWindow() / 1000).toFixed(0)}k)`
-            ));
-
-            // Save checkpoint
-            await this.checkpoint.save({
-              targetPath,
-              processedFiles: Array.from(processedFiles),
-              totalBugsFound,
-              timestamp: Date.now()
-            });
-
-            // Move to next chunk
+            totalBugsFound += bugsFound;
             j += chunk.length;
           }
         } else {
@@ -788,6 +418,338 @@ export class Orchestrator {
     } else if (this.clonedRepoPath) {
       console.log(chalk.gray(`\nCloned repository kept at: ${this.clonedRepoPath}`));
     }
+  }
+
+  private async processChunk(
+    chunk: string[],
+    iteration: number,
+    phase: string,
+    targetPath: string,
+    processedFiles: Set<string>,
+    totalBugsFound: number,
+    estimatedChunksRemaining: number,
+    totalFilesCount: number
+  ): Promise<{ bugsFound: number }> {
+    console.log(chalk.bold(`\n[${phase}] Chunk ${iteration} (${chunk.length} files | ~${estimatedChunksRemaining} chunks remaining)`));
+    console.log(chalk.gray(`  ${this.dynamicChunker.getExplanation()}`));
+
+    // Update dashboard
+    this.dashboard.update({
+      phase: 'chunking',
+      progress: { current: iteration, total: iteration + estimatedChunksRemaining },
+      currentFile: chunk[0] ? path.basename(chunk[0]) : '',
+    });
+    this.dashboard.addActivity(`Chunk ${iteration}: analyzing ${chunk.length} files`);
+
+    const chunkStartTime = Date.now();
+
+    // Context Building
+    process.stdout.write(chalk.cyan(`  Planning: examining ${chunk.length} files... `));
+
+    const contextResult = await this.analyzer.analyze(chunk);
+    const context = contextResult.context || contextResult;
+    const contextTokens = contextResult.tokensUsed || 0;
+    this.totalTokensUsed += contextTokens;
+    this.tokensByPhase.set('context-building', (this.tokensByPhase.get('context-building') || 0) + contextTokens);
+
+    const contextWindowPercent = ((this.totalTokensUsed / getDefaultContextWindow()) * 100).toFixed(1);
+
+    // Clear line and show completion
+    process.stdout.write('\r' + ' '.repeat(80) + '\r');
+    console.log(chalk.green(
+      `✓ Analysis planned & context built: ${context.files.length} components | ` +
+      `${contextTokens.toLocaleString()} tokens (${contextWindowPercent}% of ${(getDefaultContextWindow() / 1000).toFixed(0)}k)`
+    ));
+
+    // Vulnerability Detection
+    console.log(chalk.cyan(`\n  → Vulnerability detection: correlating findings and analyzing exploitability...`));
+    const detectionStartTokens = this.totalTokensUsed;
+    let vulnerabilities = await this.detector.detect(context);
+    const detectionTokens = this.totalTokensUsed - detectionStartTokens;
+
+    // Update dashboard with detection results
+    this.dashboard.update({
+      phase: 'vulnerability-detection',
+      tokensUsed: this.totalTokensUsed,
+    });
+
+    if (vulnerabilities.length > 0) {
+      console.log(chalk.green(`    ✓ Found ${vulnerabilities.length} potential vulnerabilities | ${detectionTokens.toLocaleString()} tokens`));
+
+      // Feed findings to dashboard
+      for (const v of vulnerabilities) {
+        const sev = (v.severity?.toLowerCase() || 'low') as 'critical' | 'high' | 'medium' | 'low';
+        this.dashboard.addFinding(sev, `${v.type} at ${v.location?.file?.split('/').pop() || 'unknown'}`);
+      }
+
+      // Show sample of what was found (Claude decides what's important)
+      const sample = vulnerabilities.slice(0, 3);
+      for (const vuln of sample) {
+        const severity = vuln.severity?.toUpperCase() || 'UNKNOWN';
+        const severityColor = ['critical', 'high'].includes(vuln.severity?.toLowerCase() || '') ? chalk.red : chalk.yellow;
+        const attackerNote = vuln.attackerControlled?.isControlled ? 'VERIFIED ' : '';
+        console.log(severityColor(`      ${attackerNote}[${severity}] ${vuln.type} at ${vuln.location.file.split('/').pop()}:${vuln.location.line}`));
+      }
+      if (vulnerabilities.length > 3) {
+        console.log(chalk.gray(`      ... and ${vulnerabilities.length - 3} more`));
+      }
+    } else {
+      console.log(chalk.gray(`    ✓ No vulnerabilities in this chunk | ${detectionTokens.toLocaleString()} tokens`));
+    }
+
+    // Recursive Analysis (if enabled)
+    if (this.config.recursive.enabled && vulnerabilities.length > 0) {
+      this.dashboard.update({ phase: 'validation' });
+      console.log(chalk.cyan(`\n  → Recursive verification: tracing call chains, checking contradictions...`));
+      const recursiveStartTokens = this.totalTokensUsed;
+      const enhanced = await this.recursiveEngine.apply(vulnerabilities, context);
+      const recursiveTokens = this.totalTokensUsed - recursiveStartTokens;
+
+      // Count verification statuses instead of filtering
+      const verified = enhanced.filter(v => v.verificationStatus === 'verified' || !v.verificationStatus).length;
+      const uncertain = enhanced.filter(v => v.verificationStatus === 'uncertain').length;
+      const contradicted = enhanced.filter(v => v.verificationStatus === 'contradicted').length;
+      const needsReview = enhanced.filter(v => v.needsManualReview).length;
+
+      vulnerabilities = enhanced; // Keep ALL findings
+
+      // Show verification breakdown
+      if (verified === enhanced.length) {
+        console.log(chalk.green(`    ✓ All ${enhanced.length} findings verified as exploitable | ${recursiveTokens.toLocaleString()} tokens`));
+      } else {
+        console.log(chalk.yellow(`    ✓ Verification complete: ${verified} verified, ${uncertain} uncertain, ${contradicted} contradicted | ${recursiveTokens.toLocaleString()} tokens`));
+        if (needsReview > 0) {
+          console.log(chalk.cyan(`      → ${needsReview} finding${needsReview > 1 ? 's' : ''} flagged for manual review`));
+        }
+      }
+    }
+
+    // Regression Detection
+    if (vulnerabilities.length > 0) {
+      process.stdout.write(chalk.cyan(`  Checking git history... `));
+      const regressions = await this.regressionDetector.detectRegressions(
+        targetPath,
+        vulnerabilities
+      );
+
+      process.stdout.write('\r' + ' '.repeat(80) + '\r');
+      if (regressions.length > 0) {
+        console.log(chalk.yellow(`⚠ Found ${regressions.length} regressions (previously fixed bugs)`));
+
+        // Attach regression info to vulnerabilities
+        for (const regression of regressions) {
+          regression.vulnerability.regression = {
+            originalFix: regression.originalFix.commit,
+            similarity: regression.similarity,
+            type: regression.type
+          };
+        }
+      } else {
+        console.log(chalk.gray(`✓ No regressions found`));
+      }
+    }
+
+    // Blast Radius Calculation
+    if (vulnerabilities.length > 0) {
+      console.log(chalk.cyan(`  Mapping blast radius for ${vulnerabilities.length} vulnerabilit${vulnerabilities.length !== 1 ? 'ies' : 'y'}...`));
+
+      for (let vi = 0; vi < vulnerabilities.length; vi++) {
+        const vuln = vulnerabilities[vi];
+        process.stdout.write(chalk.hex('#FF8C00')(`\r    ⚡ Analyzing impact ${vi + 1}/${vulnerabilities.length}: ${vuln.id}...`));
+
+        const blastRadius = await this.blastRadiusCalc.calculateBlastRadius(
+          vuln,
+          context,
+          targetPath
+        );
+
+        vuln.blastRadius = blastRadius;
+
+        // Show result for this vulnerability
+        process.stdout.write('\r' + ' '.repeat(100) + '\r');
+        console.log(chalk.gray(`      ${vuln.id}: ${blastRadius.callSiteCount} call site${blastRadius.callSiteCount !== 1 ? 's' : ''}`));
+      }
+
+      const totalCallSites = vulnerabilities.reduce((sum, v) => sum + (v.blastRadius?.callSiteCount || 0), 0);
+      console.log(chalk.gray(`    ✓ Impact mapped: ${totalCallSites} total call sites affected`));
+    }
+
+    let bugsFound = 0;
+
+    if (vulnerabilities.length > 0) {
+      // POC Generation + Validation
+      this.dashboard.update({ phase: 'poc-generation' });
+      console.log(chalk.cyan(`  Generating and validating POCs for ${vulnerabilities.length} vulnerabilit${vulnerabilities.length !== 1 ? 'ies' : 'y'}...`));
+      const allFindings: any[] = [];  // KEEP EVERYTHING
+
+      for (let vi = 0; vi < vulnerabilities.length; vi++) {
+        const vuln = vulnerabilities[vi];
+
+        if (this.config.poc.generate) {
+          try {
+            process.stdout.write(chalk.hex('#FF8C00')(`\r    ⚡ POC ${vi + 1}/${vulnerabilities.length}: Generating for ${vuln.id}...`));
+            const poc = await this.pocGen.generate(vuln, context);
+
+            // Anti-hallucination: Validate POC actually works
+            if (this.config.poc.validate) {
+              process.stdout.write(chalk.hex('#FF8C00')(`\r    ⚡ POC ${vi + 1}/${vulnerabilities.length}: Validating ${vuln.id}...          `));
+              const isValid = await this.pocGen.validate(poc);
+              if (isValid) {
+                vuln.poc = poc;
+                vuln.poc.validated = true;
+                process.stdout.write('\r' + ' '.repeat(100) + '\r');
+                console.log(chalk.green(`      ✓ ${vuln.id}: POC validated`));
+              } else {
+                // POC didn't work - KEEP THE FINDING but mark it
+                vuln.poc = poc;
+                vuln.poc.validated = false;
+                vuln.needsManualReview = true;
+                if (!vuln.verificationStatus) {
+                  vuln.verificationStatus = 'unverified';
+                }
+                process.stdout.write('\r' + ' '.repeat(100) + '\r');
+                console.log(chalk.yellow(`      ⚠ ${vuln.id}: POC validation failed - marked for manual review`));
+              }
+            } else {
+              // Validation skipped
+              vuln.poc = poc;
+              vuln.poc.validated = false;
+              process.stdout.write('\r' + ' '.repeat(100) + '\r');
+              console.log(chalk.gray(`      ${vuln.id}: POC generated (validation skipped)`));
+            }
+          } catch (error) {
+            // POC generation failed - STILL KEEP THE FINDING
+            process.stdout.write('\r' + ' '.repeat(100) + '\r');
+            console.log(chalk.yellow(`      ⚠ ${vuln.id}: POC generation failed, reported without POC`));
+            vuln.needsManualReview = true;
+          }
+        }
+
+        // ALWAYS add to findings list - NEVER discard
+        allFindings.push(vuln);
+        hooks.emit(HookType.FindingDetected, vuln);
+      }
+
+      // Count findings by status
+      const validated = allFindings.filter(v => v.poc?.validated === true).length;
+      const unvalidated = allFindings.filter(v => v.poc && v.poc.validated === false).length;
+      const noPOC = allFindings.filter(v => !v.poc).length;
+      const highSeverity = allFindings.filter(v => v.severity === 'critical' || v.severity === 'high').length;
+
+      if (highSeverity > 0) {
+        console.log(chalk.red(`    ✓ Collected ${allFindings.length} findings (${highSeverity} HIGH/CRITICAL) - ${validated} validated, ${unvalidated} unvalidated, ${noPOC} no POC`));
+      } else {
+        console.log(chalk.green(`    ✓ Collected ${allFindings.length} findings - ${validated} validated, ${unvalidated} unvalidated, ${noPOC} no POC`));
+      }
+      bugsFound = allFindings.length;
+      const newTotalBugsFound = totalBugsFound + bugsFound;
+
+      // Report Generation - REPORT EVERYTHING
+      if (allFindings.length > 0) {
+        await this.reporter.report(allFindings);
+
+        // Show breakdown
+        const verifiedCount = allFindings.filter(v =>
+          v.verificationStatus === 'verified' ||
+          (!v.verificationStatus && v.poc?.validated === true)
+        ).length;
+        const uncertainCount = allFindings.filter(v =>
+          v.verificationStatus === 'uncertain' ||
+          v.poc?.validated === false
+        ).length;
+        const contradictedCount = allFindings.filter(v =>
+          v.verificationStatus === 'contradicted'
+        ).length;
+
+        console.log(chalk.green.bold(`\n${allFindings.length} findings documented:`));
+        console.log(chalk.green(`  ✓ ${verifiedCount} verified`));
+        console.log(chalk.yellow(`  ⚠ ${uncertainCount} uncertain/unvalidated`));
+        console.log(chalk.red(`  ✗ ${contradictedCount} contradicted`));
+        console.log();
+
+        // IMMEDIATE CHECKPOINT: Save findings count right after writing to disk
+        // This prevents loss if process crashes before main checkpoint
+        chunk.forEach(f => processedFiles.add(f));
+
+        // Mark files in attack paths (tracks for metrics/debugging)
+        // Note: Recursive strategies can already read these files as needed
+        // This tracking helps identify which files are frequently part of attack chains
+        for (const finding of allFindings) {
+          const attackPathFiles = this.extractAttackPathFiles(finding);
+          for (const file of attackPathFiles) {
+            await this.checkpoint.markAttackPathFile(file, finding.id);
+          }
+        }
+
+        await this.checkpoint.save({
+          targetPath,
+          processedFiles: Array.from(processedFiles),
+          totalBugsFound: newTotalBugsFound,
+          timestamp: Date.now()
+        });
+        console.log(chalk.gray(`    → Checkpoint saved (${allFindings.length} findings secured)`));
+
+        // Update planner with learnings from validated bugs (for next chunk's planning)
+        const successfulStrategies = context.files
+          .filter((f: any) => allFindings.some((v: any) => v.location.file.includes(f.path)))
+          .map((f: any) => f.analysisStrategy)
+          .filter(Boolean);
+
+        this.analyzer.updateLearnings({
+          vulnerabilities: allFindings,
+          successfulStrategies: successfulStrategies.length > 0 ? successfulStrategies : undefined
+        });
+
+        console.log(chalk.cyan(`    → Planner updated with ${allFindings.length} new finding${allFindings.length !== 1 ? 's' : ''} for next chunk`));
+      }
+    } else {
+      // No vulnerabilities found, still mark files as processed
+      chunk.forEach(f => processedFiles.add(f));
+
+      // Save checkpoint even when no bugs found
+      await this.checkpoint.save({
+        targetPath,
+        processedFiles: Array.from(processedFiles),
+        totalBugsFound,
+        timestamp: Date.now()
+      });
+    }
+
+    // Update dynamic chunker metrics
+    const chunkTime = Date.now() - chunkStartTime;
+    await this.dynamicChunker.updateMetrics(
+      chunk,
+      contextTokens + (detectionTokens || 0),
+      this.totalTokensUsed,
+      chunkTime
+    );
+
+    // Show chunk summary with cumulative stats
+    const contextPercent = ((this.totalTokensUsed / getDefaultContextWindow()) * 100).toFixed(1);
+    const chunkTimeMin = (chunkTime / 60000).toFixed(1);
+    const bugsThisChunk = vulnerabilities.filter(v => v.poc?.validated).length;
+
+    console.log(chalk.bold.cyan(
+      `\n━━━ Chunk ${iteration} Summary ━━━`
+    ));
+    console.log(chalk.gray(
+      `  Time: ${chunkTimeMin} min | ` +
+      `Files analyzed: ${chunk.length} | ` +
+      `Bugs found: ${bugsThisChunk}`
+    ));
+    console.log(chalk.gray(
+      `  Progress: ${processedFiles.size}/${totalFilesCount} files (${((processedFiles.size/totalFilesCount)*100).toFixed(1)}%) | ` +
+      `Total bugs: ${totalBugsFound + bugsFound} | ` +
+      `Context: ${contextPercent}% of 200k`
+    ));
+
+    // Show next chunk size reasoning
+    const nextSize = this.dynamicChunker.getChunkSize();
+    console.log(chalk.gray(
+      `  Next chunk: ${nextSize} files (${this.dynamicChunker.getExplanation()})`
+    ));
+
+    return { bugsFound };
   }
 
   /**

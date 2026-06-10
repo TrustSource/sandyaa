@@ -10,6 +10,8 @@ const TOOL_NAME = 'Sandyaa';
 const TOOL_VERSION = '1.0.0';
 const TOOL_INFO_URI = 'https://github.com/ssk/sandyaa';
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export class SarifReporter {
   private config: Config;
   private findingsDir: string;
@@ -28,6 +30,59 @@ export class SarifReporter {
     const outputPath = path.join(this.findingsDir, 'sarif-report.json');
     await fs.writeFile(outputPath, JSON.stringify(sarif, null, 2));
     console.log(chalk.cyan('SARIF report:'), outputPath);
+  }
+
+  // Reads the written SARIF file and POSTs it to TrustSource.
+  // Assumption: module/project identifiers are sent as URL query parameters
+  // (not merged into the body), since the request body is already the full SARIF document.
+  async upload(moduleIdentifier: string, projectName?: string): Promise<void> {
+    const apiKey = process.env.TRUSTSOURCE_API_KEY;
+    if (!apiKey) {
+      throw new Error('TRUSTSOURCE_API_KEY environment variable is not set');
+    }
+
+    const baseUrl = (process.env.TRUSTSOURCE_BASE_URL || 'https://app.trustsource.io').replace(/\/$/, '');
+    const sarifPath = path.join(this.findingsDir, 'sarif-report.json');
+    const sarifContent = await fs.readFile(sarifPath, 'utf-8');
+
+    const params = new URLSearchParams();
+    if (UUID_RE.test(moduleIdentifier)) {
+      params.set('moduleId', moduleIdentifier);
+    } else {
+      params.set('moduleName', moduleIdentifier);
+      if (projectName) {
+        params.set('projectName', projectName);
+      }
+    }
+
+    const url = `${baseUrl}/api/v2/sarif?${params.toString()}`;
+    console.log(chalk.cyan('Uploading SARIF to TrustSource...'));
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: sarifContent,
+    });
+
+    const responseText = await response.text();
+
+    if (response.ok) {
+      const moduleInfo = UUID_RE.test(moduleIdentifier)
+        ? `moduleId: ${moduleIdentifier}`
+        : projectName
+          ? `project: ${projectName}, module: ${moduleIdentifier}`
+          : `module: ${moduleIdentifier}`;
+      console.log(chalk.green(`✓ SARIF uploaded to TrustSource (${moduleInfo})`));
+    } else {
+      let errorMessage = `Upload failed: HTTP ${response.status}\n${responseText}`;
+      if (response.status === 404 && !projectName) {
+        errorMessage += '\nHint: Module not found. Use --ts-project <name> to specify the project for auto-creation.';
+      }
+      throw new Error(errorMessage);
+    }
   }
 
   private createScanName(targetPath: string): string {

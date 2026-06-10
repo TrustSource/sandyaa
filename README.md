@@ -135,9 +135,9 @@ Which of these run on a given chunk depends on the planner's view of the code.
 
 ## TrustSource Integration
 
-Sandyaa can export findings in [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) format, which TrustSource can ingest to map code-level vulnerabilities to modules in its threat model (OTM).
+Sandyaa can export findings in [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) format and upload them directly to TrustSource, which maps code-level vulnerabilities to modules in its threat model (OTM).
 
-### Generate the SARIF report
+### Generate the SARIF report only
 
 Pass `--sarif` when running a scan:
 
@@ -151,18 +151,26 @@ The report is written alongside the existing Markdown output:
 findings/<scan-name>/sarif-report.json
 ```
 
-### Upload to TrustSource
+### Upload directly to TrustSource
 
-Use the TrustSource SARIF import API:
+Set `TRUSTSOURCE_API_KEY` and pass `--ts-upload <module>`. The SARIF file is generated automatically — no need to also pass `--sarif`.
 
 ```bash
-curl -X POST "https://app.trustsource.io/api/v2/sarif/{projectId}" \
-  -H "Authorization: Bearer <API_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d @findings/<scan-name>/sarif-report.json
+export TRUSTSOURCE_API_KEY=<your-api-token>
+
+# Module name only — searches existing modules in the company
+sandyaa --ts-upload my-module /path/to/project
+
+# Module name + project — auto-creates module inside the project if needed
+sandyaa --ts-upload my-module --ts-project my-project /path/to/project
+
+# Module UUID — direct, unambiguous lookup
+sandyaa --ts-upload 550e8400-e29b-41d4-a716-446655440000 /path/to/project
 ```
 
-Replace `{projectId}` with your TrustSource project identifier and `<API_TOKEN>` with a valid API token from your TrustSource account settings.
+If the upload fails, Sandyaa prints the HTTP status and response body. The local SARIF file is always preserved regardless of upload outcome.
+
+For on-prem TrustSource installations, set `TRUSTSOURCE_BASE_URL` to override the default `https://app.trustsource.io`.
 
 The SARIF file uses paths relative to the scan root, matches SARIF schema version `2.1.0`, and includes Sandyaa-specific fields (exploitability score, verification status, blast radius, etc.) in the `properties` bag of each result.
 

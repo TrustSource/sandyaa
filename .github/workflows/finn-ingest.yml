@@ -6,11 +6,34 @@ on:
 
 jobs:
   ingest:
-    if: |
-      contains(github.event.issue.labels.*.name, 'agent-task') &&
-      contains(github.event.issue.assignees.*.login, 'flnDEV-eacg')
+    if: contains(github.event.issue.labels.*.name, 'agent-task')
     runs-on: ubuntu-latest
     steps:
+      - name: Pre-flight checks
+        env:
+          FINN_KEY: ${{ secrets.FINN_API_KEY }}
+        run: |
+          FAIL=0
+
+          # Assignee check
+          ASSIGNEES='${{ toJSON(github.event.issue.assignees.*.login) }}'
+          if ! echo "$ASSIGNEES" | grep -q "flnDEV-eacg"; then
+            echo "::error::flnDEV-eacg is not assigned to this issue. Assign first, then re-add the agent-task label."
+            FAIL=1
+          fi
+
+          # Secret check
+          if [ -z "$FINN_KEY" ]; then
+            echo "::error::FINN_API_KEY secret is not set or not visible to this repository. Check org secret visibility."
+            FAIL=1
+          fi
+
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Pre-flight failed. Fix the above issues, then remove and re-add the agent-task label."
+            exit 1
+          fi
+          echo "✅ Pre-flight passed"
+
       - name: Determine priority
         id: priority
         run: |
@@ -52,7 +75,8 @@ jobs:
 
       - name: Call Ingest API
         run: |
-          curl -sf -X POST "https://dev-team.eacg.de/ingest" \
+          HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" \
+            -X POST "https://dev-team.eacg.de/ingest" \
             -H "Content-Type: application/json" \
             -H "x-api-key: ${{ secrets.FINN_API_KEY }}" \
             -d '{
@@ -64,4 +88,13 @@ jobs:
               "increment": "${{ steps.increment.outputs.increment }}",
               "model": "${{ steps.model.outputs.model }}",
               "no_docs": ${{ steps.nodocs.outputs.no_docs }}
-            }'
+            }')
+
+          BODY=$(cat /tmp/response.txt)
+          echo "Backend responded HTTP $HTTP_CODE: $BODY"
+
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            echo "::error::Ingest API returned HTTP $HTTP_CODE: $BODY"
+            exit 1
+          fi
+          echo "✅ Ingest successful"

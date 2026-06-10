@@ -14,15 +14,33 @@ jobs:
       contains(github.event.issue.labels.*.name, 'agent-task')
     runs-on: ubuntu-latest
     steps:
+      - name: Pre-flight check
+        env:
+          FINN_KEY: ${{ secrets.FINN_API_KEY }}
+        run: |
+          if [ -z "$FINN_KEY" ]; then
+            echo "::error::FINN_API_KEY secret is not set or not visible to this repository."
+            exit 1
+          fi
+
       - name: Call Unblock API
         run: |
-          curl -sf -X POST "https://dev-team.eacg.de/unblock" \
+          HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" \
+            -X POST "https://dev-team.eacg.de/unblock" \
             -H "Content-Type: application/json" \
             -H "x-api-key: ${{ secrets.FINN_API_KEY }}" \
             -d '{
               "repo": "${{ github.repository }}",
               "issue_number": ${{ github.event.issue.number }}
-            }'
+            }')
+
+          BODY=$(cat /tmp/response.txt)
+          echo "Backend responded HTTP $HTTP_CODE: $BODY"
+
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            echo "::error::Unblock API returned HTTP $HTTP_CODE: $BODY"
+            exit 1
+          fi
 
   re-review:
     # /re-review command on a PR → reset iteration counter + retrigger Paul
@@ -47,7 +65,8 @@ jobs:
 
       - name: Reset iteration counter + Finn task status
         run: |
-          curl -sf -X POST "https://dev-team.eacg.de/unblock" \
+          HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" \
+            -X POST "https://dev-team.eacg.de/unblock" \
             -H "Content-Type: application/json" \
             -H "x-api-key: ${{ secrets.FINN_API_KEY }}" \
             -d '{
@@ -55,7 +74,15 @@ jobs:
               "issue_number": ${{ steps.pr.outputs.issue_number }},
               "pr_number": ${{ github.event.issue.number }},
               "action": "re-review"
-            }'
+            }')
+
+          BODY=$(cat /tmp/response.txt)
+          echo "Backend responded HTTP $HTTP_CODE: $BODY"
+
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            echo "::error::Unblock/re-review API returned HTTP $HTTP_CODE: $BODY"
+            exit 1
+          fi
 
       - name: Retrigger Paul review
         uses: actions/checkout@v4

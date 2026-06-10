@@ -244,8 +244,18 @@ jobs:
               }
             }')
 
-          curl -sf -X POST \
+          HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" \
+            -X POST \
             -H "Content-Type: application/json" \
             -H "x-api-key: ${{ secrets.FINN_API_KEY }}" \
             -d "$PAYLOAD" \
-            "https://dev-team.eacg.de/review"
+            "https://dev-team.eacg.de/review")
+
+          BODY=$(cat /tmp/response.txt)
+          echo "Backend responded HTTP $HTTP_CODE: $BODY"
+
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            echo "::error::Paul Review API returned HTTP $HTTP_CODE: $BODY"
+            exit 1
+          fi
+          echo "✅ Review submitted"

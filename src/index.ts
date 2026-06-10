@@ -64,6 +64,7 @@ program
   .argument('<target>', 'Path to target codebase or git URL')
   .option('-c, --config <path>', 'Path to config file', '.sandyaa/config.yaml')
   .option('--fresh', 'Start fresh analysis, ignore existing checkpoint')
+  .option('--sarif', 'Generate a SARIF 2.1.0 report alongside Markdown output (for TrustSource / SAST tooling)')
   .option(
     '-m, --model <tier>',
     'Pin every Claude task to a specific model (haiku|sonnet|opus). ' +
@@ -128,7 +129,7 @@ program
       ClaudeExecutor.setGlobalTargetPath(targetResolved);
 
       const orchestrator = new Orchestrator(config);
-      await orchestrator.run(options.fresh);
+      await orchestrator.run(options.fresh, options.sarif ?? false);
 
     } catch (error) {
       console.error(chalk.red('Error:'), error);

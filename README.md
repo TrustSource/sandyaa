@@ -133,6 +133,39 @@ findings/
 
 Which of these run on a given chunk depends on the planner's view of the code.
 
+## TrustSource Integration
+
+Sandyaa can export findings in [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) format, which TrustSource can ingest to map code-level vulnerabilities to modules in its threat model (OTM).
+
+### Generate the SARIF report
+
+Pass `--sarif` when running a scan:
+
+```bash
+sandyaa --sarif /path/to/project
+```
+
+The report is written alongside the existing Markdown output:
+
+```
+findings/<scan-name>/sarif-report.json
+```
+
+### Upload to TrustSource
+
+Use the TrustSource SARIF import API:
+
+```bash
+curl -X POST "https://app.trustsource.io/api/v2/sarif/{projectId}" \
+  -H "Authorization: Bearer <API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d @findings/<scan-name>/sarif-report.json
+```
+
+Replace `{projectId}` with your TrustSource project identifier and `<API_TOKEN>` with a valid API token from your TrustSource account settings.
+
+The SARIF file uses paths relative to the scan root, matches SARIF schema version `2.1.0`, and includes Sandyaa-specific fields (exploitability score, verification status, blast radius, etc.) in the `properties` bag of each result.
+
 ## Share your CVEs
 
 If Sandyaa helped you find a bug that was assigned a CVE, we'd like to know. Open a PR adding an entry to `CVES.md` (or a GitHub issue if you prefer) with:

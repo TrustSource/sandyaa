@@ -38,3 +38,8 @@ test-cursor*.js
 # are working notes and should not be committed.
 /*.md
 !/README.md
+!/CLAUDE.md
+!/AGENT_INSTRUCTIONS.md
+!/DANA_INSTRUCTIONS.md
+!/CHANGELOG.md
+!/ARCHITECTURE.md

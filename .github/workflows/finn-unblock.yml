@@ -1,0 +1,71 @@
+name: "Finn: Unblock / Re-review"
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  unblock:
+    # Non-agent comment on an agent-task Issue (not a PR) → unblock Finn
+    if: |
+      !github.event.issue.pull_request &&
+      github.event.comment.user.login != 'flnDEV-eacg' &&
+      github.event.comment.user.login != 'pbrQA-eacg' &&
+      contains(github.event.issue.labels.*.name, 'agent-task')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Unblock API
+        run: |
+          curl -sf -X POST "https://dev-team.eacg.de/unblock" \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: ${{ secrets.FINN_API_KEY }}" \
+            -d '{
+              "repo": "${{ github.repository }}",
+              "issue_number": ${{ github.event.issue.number }}
+            }'
+
+  re-review:
+    # /re-review command on a PR → reset iteration counter + retrigger Paul
+    if: |
+      github.event.issue.pull_request &&
+      github.event.comment.user.login != 'flnDEV-eacg' &&
+      github.event.comment.user.login != 'pbrQA-eacg' &&
+      contains(github.event.comment.body, '/re-review')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get PR details
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_JSON=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.issue.number }})
+          HEAD_REF=$(echo "$PR_JSON" | jq -r '.head.ref')
+          PR_BODY=$(echo "$PR_JSON" | jq -r '.body // ""')
+          ISSUE_NUM=$(echo "$PR_BODY" | grep -oP 'Closes #\K\d+' | head -1)
+          echo "head_ref=${HEAD_REF}" >> $GITHUB_OUTPUT
+          echo "issue_number=${ISSUE_NUM:-0}" >> $GITHUB_OUTPUT
+
+      - name: Reset iteration counter + Finn task status
+        run: |
+          curl -sf -X POST "https://dev-team.eacg.de/unblock" \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: ${{ secrets.FINN_API_KEY }}" \
+            -d '{
+              "repo": "${{ github.repository }}",
+              "issue_number": ${{ steps.pr.outputs.issue_number }},
+              "pr_number": ${{ github.event.issue.number }},
+              "action": "re-review"
+            }'
+
+      - name: Retrigger Paul review
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push empty commit to trigger paul-review.yml
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: retrigger review (/re-review by ${{ github.event.comment.user.login }})"
+          git push

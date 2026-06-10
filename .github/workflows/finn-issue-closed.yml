@@ -1,0 +1,23 @@
+name: "Finn: Issue Closed"
+
+on:
+  issues:
+    types: [closed]
+
+jobs:
+  mark-done:
+    if: contains(github.event.issue.labels.*.name, 'agent-task')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark task as done
+        run: |
+          curl -sf -X POST "https://dev-team.eacg.de/ingest" \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: ${{ secrets.FINN_API_KEY }}" \
+            -d '{
+              "repo": "${{ github.repository }}",
+              "issue_number": ${{ github.event.issue.number }},
+              "issue_url": "${{ github.event.issue.html_url }}",
+              "title": ${{ toJSON(github.event.issue.title) }},
+              "action": "close"
+            }'

@@ -1,0 +1,251 @@
+name: Paul — PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  paul-review:
+    if: github.event.pull_request.user.login == 'flnDEV-eacg'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Detect changed directories and install
+        id: install
+        continue-on-error: true
+        run: |
+          # Find directories with package.json (root or subdirs)
+          # For monorepos: detect which subdirectories were changed in this PR
+          CHANGED_FILES=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --name-only)
+
+          install_dir() {
+            local dir="$1"
+            echo "Installing in ${dir}..."
+            cd "$dir"
+            if [ -f "pnpm-lock.yaml" ]; then
+              npm install -g pnpm && pnpm install --frozen-lockfile
+            elif [ -f "yarn.lock" ]; then
+              corepack enable && yarn install --immutable
+            elif [ -f "bun.lockb" ] || [ -f "bun.lock" ]; then
+              curl -fsSL https://bun.sh/install | bash && ~/.bun/bin/bun install
+            elif [ -f "package-lock.json" ]; then
+              npm ci
+            elif [ -f "package.json" ]; then
+              npm install
+            fi
+            cd "$GITHUB_WORKSPACE"
+          }
+
+          INSTALLED_DIRS=""
+
+          if [ -f "package.json" ]; then
+            # Single-package repo: install at root
+            install_dir "."
+            INSTALLED_DIRS="."
+          else
+            # Monorepo: find subdirectories with package.json that have changed files
+            for dir in $(find . -maxdepth 2 -name "package.json" -not -path "*/node_modules/*" -exec dirname {} \;); do
+              dir_clean="${dir#./}"
+              if echo "$CHANGED_FILES" | grep -q "^${dir_clean}/"; then
+                install_dir "$dir_clean"
+                INSTALLED_DIRS="${INSTALLED_DIRS} ${dir_clean}"
+              fi
+            done
+          fi
+
+          if [ -z "$INSTALLED_DIRS" ]; then
+            echo "No installable directories found for changed files"
+            exit 1
+          fi
+
+          echo "installed_dirs=${INSTALLED_DIRS}" >> $GITHUB_OUTPUT
+          echo "Installed: ${INSTALLED_DIRS}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Run Lint
+        id: lint
+        continue-on-error: true
+        run: |
+          if [ "${{ steps.install.outcome }}" = "failure" ]; then
+            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "summary=skipped (install failed)" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          set +e
+          TOTAL_ERRORS=0
+          ALL_PASSED=true
+          for dir in ${{ steps.install.outputs.installed_dirs }}; do
+            if [ -f "${dir}/package.json" ] && grep -q '"lint"' "${dir}/package.json"; then
+              echo "Linting ${dir}..."
+              OUTPUT=$(cd "$dir" && npm run lint 2>&1)
+              if [ $? -ne 0 ]; then ALL_PASSED=false; fi
+              ERRORS=$(echo "$OUTPUT" | grep -c "error" || echo "0")
+              TOTAL_ERRORS=$((TOTAL_ERRORS + ERRORS))
+            fi
+          done
+          echo "passed=${ALL_PASSED}" >> $GITHUB_OUTPUT
+          echo "summary=${TOTAL_ERRORS} errors" >> $GITHUB_OUTPUT
+          echo "error_count=${TOTAL_ERRORS}" >> $GITHUB_OUTPUT
+
+      - name: Run Type Check
+        id: types
+        continue-on-error: true
+        run: |
+          if [ "${{ steps.install.outcome }}" = "failure" ]; then
+            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "summary=skipped (install failed)" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          set +e
+          TOTAL_ERRORS=0
+          ALL_PASSED=true
+          for dir in ${{ steps.install.outputs.installed_dirs }}; do
+            if [ -f "${dir}/tsconfig.json" ]; then
+              echo "Type-checking ${dir}..."
+              OUTPUT=$(cd "$dir" && npx tsc --noEmit 2>&1)
+              if [ $? -ne 0 ]; then ALL_PASSED=false; fi
+              ERRORS=$(echo "$OUTPUT" | grep -c "error TS" || echo "0")
+              TOTAL_ERRORS=$((TOTAL_ERRORS + ERRORS))
+            fi
+          done
+          echo "passed=${ALL_PASSED}" >> $GITHUB_OUTPUT
+          echo "summary=${TOTAL_ERRORS} type errors" >> $GITHUB_OUTPUT
+          echo "error_count=${TOTAL_ERRORS}" >> $GITHUB_OUTPUT
+
+      - name: Run Unit Tests
+        id: unit
+        continue-on-error: true
+        run: |
+          if [ "${{ steps.install.outcome }}" = "failure" ]; then
+            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "summary=skipped (install failed)" >> $GITHUB_OUTPUT
+            echo "coverage=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          set +e
+          ALL_PASSED=true
+          TOTAL_COVERAGE=0
+          DIR_COUNT=0
+          for dir in ${{ steps.install.outputs.installed_dirs }}; do
+            if [ -f "${dir}/package.json" ] && grep -q '"test"' "${dir}/package.json"; then
+              echo "Testing ${dir}..."
+              OUTPUT=$(cd "$dir" && npm test -- --coverage 2>&1)
+              if [ $? -ne 0 ]; then ALL_PASSED=false; fi
+              COV=$(echo "$OUTPUT" | grep -oP 'All files\s*\|\s*\K[\d.]+' || echo "0")
+              TOTAL_COVERAGE=$(echo "$TOTAL_COVERAGE + $COV" | bc)
+              DIR_COUNT=$((DIR_COUNT + 1))
+            fi
+          done
+          AVG_COVERAGE=$([ $DIR_COUNT -gt 0 ] && echo "scale=1; $TOTAL_COVERAGE / $DIR_COUNT" | bc || echo "0")
+          SUMMARY=$($ALL_PASSED && echo "all passed" || echo "some failed")
+          echo "passed=${ALL_PASSED}" >> $GITHUB_OUTPUT
+          echo "summary=${SUMMARY}" >> $GITHUB_OUTPUT
+          echo "coverage=${AVG_COVERAGE}" >> $GITHUB_OUTPUT
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }})
+          # Truncate if too large (Claude context limit)
+          DIFF_SIZE=${#DIFF}
+          if [ $DIFF_SIZE -gt 100000 ]; then
+            DIFF="${DIFF:0:100000}
+
+          ... [truncated — diff too large: ${DIFF_SIZE} chars] ..."
+          fi
+          # Write to file to avoid shell escaping issues
+          echo "$DIFF" > /tmp/pr_diff.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Read repo context files
+        id: context
+        run: |
+          TEST_STRATEGY=""
+          CLAUDE_MD=""
+          if [ -f "TEST_STRATEGY.md" ]; then
+            TEST_STRATEGY=$(cat TEST_STRATEGY.md)
+          fi
+          if [ -f "CLAUDE.md" ]; then
+            CLAUDE_MD=$(cat CLAUDE.md)
+          fi
+          # Write to files for JSON encoding
+          echo "$TEST_STRATEGY" > /tmp/test_strategy.txt
+          echo "$CLAUDE_MD" > /tmp/claude_md.txt
+
+      - name: Find Finn issue ID
+        id: finn
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # Extract issue number from PR body (Closes #NNN pattern)
+          # PR_BODY passed via env to avoid shell injection from PR description
+          ISSUE_NUM=$(echo "$PR_BODY" | grep -oP 'Closes #\K\d+' | head -1)
+          ISSUE_ID=""
+          if [ -n "$ISSUE_NUM" ]; then
+            ISSUE_ID="${{ github.repository }}#${ISSUE_NUM}"
+          fi
+          echo "issue_id=${ISSUE_ID}" >> $GITHUB_OUTPUT
+
+      - name: Call Paul Review API
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # All user-controlled strings passed via env to avoid shell injection
+          UNIT_PASSED=${{ steps.unit.outputs.passed || 'false' }}
+          LINT_PASSED=${{ steps.lint.outputs.passed || 'false' }}
+          TYPES_PASSED=${{ steps.types.outputs.passed || 'false' }}
+
+          PAYLOAD=$(jq -n \
+            --arg repo "${{ github.repository }}" \
+            --argjson pr_number "${{ github.event.pull_request.number }}" \
+            --arg pr_url "${{ github.event.pull_request.html_url }}" \
+            --arg title "$PR_TITLE" \
+            --arg author "${{ github.event.pull_request.user.login }}" \
+            --arg head_branch "${{ github.event.pull_request.head.ref }}" \
+            --arg base_branch "${{ github.event.pull_request.base.ref }}" \
+            --rawfile diff /tmp/pr_diff.txt \
+            --rawfile test_strategy /tmp/test_strategy.txt \
+            --rawfile claude_md /tmp/claude_md.txt \
+            --arg finn_issue_id "${{ steps.finn.outputs.issue_id }}" \
+            --argjson unit_passed "${UNIT_PASSED}" \
+            --arg unit_summary "${{ steps.unit.outputs.summary }}" \
+            --arg unit_coverage "${{ steps.unit.outputs.coverage || '0' }}" \
+            --argjson lint_passed "${LINT_PASSED}" \
+            --arg lint_summary "${{ steps.lint.outputs.summary }}" \
+            --argjson types_passed "${TYPES_PASSED}" \
+            --arg types_summary "${{ steps.types.outputs.summary }}" \
+            '{
+              repo: $repo,
+              pr_number: $pr_number,
+              pr_url: $pr_url,
+              title: $title,
+              author: $author,
+              head_branch: $head_branch,
+              base_branch: $base_branch,
+              diff: $diff,
+              test_strategy: $test_strategy,
+              claude_md: $claude_md,
+              finn_issue_id: $finn_issue_id,
+              test_results: {
+                unit: { passed: $unit_passed, summary: $unit_summary, coverage: ($unit_coverage | tonumber) },
+                lint: { passed: $lint_passed, summary: $lint_summary },
+                types: { passed: $types_passed, summary: $types_summary }
+              }
+            }')
+
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: ${{ secrets.FINN_API_KEY }}" \
+            -d "$PAYLOAD" \
+            "https://dev-team.eacg.de/review"

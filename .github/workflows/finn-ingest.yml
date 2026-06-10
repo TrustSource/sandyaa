@@ -1,0 +1,67 @@
+name: "Finn: Ingest Issue"
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  ingest:
+    if: |
+      contains(github.event.issue.labels.*.name, 'agent-task') &&
+      contains(github.event.issue.assignees.*.login, 'flnDEV-eacg')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine priority
+        id: priority
+        run: |
+          LABELS='${{ toJSON(github.event.issue.labels.*.name) }}'
+          if echo "$LABELS" | grep -q "prio-high"; then
+            echo "priority=prio-high" >> $GITHUB_OUTPUT
+          elif echo "$LABELS" | grep -q "prio-low"; then
+            echo "priority=prio-low" >> $GITHUB_OUTPUT
+          else
+            echo "priority=prio-normal" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Determine increment
+        id: increment
+        run: |
+          LABELS='${{ toJSON(github.event.issue.labels.*.name) }}'
+          INC=$(echo "$LABELS" | grep -oE '"inc-[0-9]+"' | head -1 | tr -d '"')
+          echo "increment=${INC:-}" >> $GITHUB_OUTPUT
+
+      - name: Determine model
+        id: model
+        run: |
+          LABELS='${{ toJSON(github.event.issue.labels.*.name) }}'
+          if echo "$LABELS" | grep -q "model-opus"; then
+            echo "model=claude-opus-4-7" >> $GITHUB_OUTPUT
+          else
+            echo "model=claude-sonnet-4-6" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check no-docs flag
+        id: nodocs
+        run: |
+          LABELS='${{ toJSON(github.event.issue.labels.*.name) }}'
+          if echo "$LABELS" | grep -q "no-docs"; then
+            echo "no_docs=true" >> $GITHUB_OUTPUT
+          else
+            echo "no_docs=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Call Ingest API
+        run: |
+          curl -sf -X POST "https://dev-team.eacg.de/ingest" \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: ${{ secrets.FINN_API_KEY }}" \
+            -d '{
+              "repo": "${{ github.repository }}",
+              "issue_number": ${{ github.event.issue.number }},
+              "issue_url": "${{ github.event.issue.html_url }}",
+              "title": ${{ toJSON(github.event.issue.title) }},
+              "priority": "${{ steps.priority.outputs.priority }}",
+              "increment": "${{ steps.increment.outputs.increment }}",
+              "model": "${{ steps.model.outputs.model }}",
+              "no_docs": ${{ steps.nodocs.outputs.no_docs }}
+            }'

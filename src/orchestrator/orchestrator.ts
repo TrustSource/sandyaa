@@ -2,6 +2,7 @@ import { ContextAnalyzer } from '../analyzer/context-analyzer.js';
 import { VulnerabilityDetector } from '../detector/vulnerability-detector.js';
 import { POCGenerator } from '../poc-gen/poc-generator.js';
 import { Reporter } from '../reporter/reporter.js';
+import { SarifReporter } from '../reporter/sarif-reporter.js';
 import { Checkpoint } from '../utils/checkpoint.js';
 import { FileScanner } from '../utils/file-scanner.js';
 import { RecursiveStrategyEngine } from '../recursive/recursive-strategy.js';
@@ -122,6 +123,7 @@ export class Orchestrator {
   private dynamicChunker: DynamicChunker;
   private executor: any;  // Will hold ClaudeExecutor reference for RLM summary
   private dashboard: DashboardRenderer;
+  private sarifReporter?: SarifReporter;
 
   constructor(config: Config) {
     this.config = config;
@@ -162,7 +164,7 @@ export class Orchestrator {
     return path.join(checkpointDir, `checkpoint-${hash}.json`);
   }
 
-  async run(startFresh: boolean = false): Promise<void> {
+  async run(startFresh: boolean = false, sarif: boolean = false): Promise<void> {
     const startTime = Date.now();
     let totalBugsFound = 0;
 
@@ -208,6 +210,9 @@ export class Orchestrator {
     this.checkpoint = new Checkpoint(checkpointFile);
     this.reporter = new Reporter(this.config, targetPath);
     this.detector = new VulnerabilityDetector(this.config, targetPath);
+    if (sarif) {
+      this.sarifReporter = new SarifReporter(this.config, targetPath);
+    }
 
     console.log(chalk.gray(`Findings will be saved to: ${path.join(this.config.output.findings_dir, path.basename(targetPath))}-<hash>`));
     console.log(chalk.gray(`Target boundary: ${path.resolve(targetPath)}`));
@@ -314,6 +319,7 @@ export class Orchestrator {
     // Process files in dynamic chunks (adapts based on complexity)
     let iteration = 0;
     let i = 0;
+    const allVulnerabilities: any[] = [];
 
     while (i < filesToProcess.length) {
       iteration++;
@@ -322,11 +328,12 @@ export class Orchestrator {
       const remainingFiles = filesToProcess.length - i;
       const estimatedChunksRemaining = Math.ceil(remainingFiles / chunkSize);
 
-      const { bugsFound } = await this.processChunk(
+      const { bugsFound, findings } = await this.processChunk(
         chunk, iteration, phase, targetPath, processedFiles, totalBugsFound,
         estimatedChunksRemaining, files.length
       );
       totalBugsFound += bugsFound;
+      allVulnerabilities.push(...findings);
       i += chunk.length;
     }
 
@@ -366,11 +373,12 @@ export class Orchestrator {
             const remainingFiles = remaining.length - j;
             const estimatedChunksRemaining = Math.ceil(remainingFiles / chunkSize);
 
-            const { bugsFound } = await this.processChunk(
+            const { bugsFound, findings } = await this.processChunk(
               chunk, iteration, 'systematic', targetPath, processedFiles, totalBugsFound,
               estimatedChunksRemaining, files.length
             );
             totalBugsFound += bugsFound;
+            allVulnerabilities.push(...findings);
             j += chunk.length;
           }
         } else {
@@ -398,6 +406,11 @@ export class Orchestrator {
     if (tokenStats) {
       console.log(chalk.cyan('\nToken Usage:'));
       console.log(chalk.gray(tokenStats));
+    }
+
+    // Generate SARIF report if requested
+    if (this.sarifReporter) {
+      await this.sarifReporter.generate(allVulnerabilities);
     }
 
     // Generate summary report
@@ -429,7 +442,7 @@ export class Orchestrator {
     totalBugsFound: number,
     estimatedChunksRemaining: number,
     totalFilesCount: number
-  ): Promise<{ bugsFound: number }> {
+  ): Promise<{ bugsFound: number; findings: any[] }> {
     console.log(chalk.bold(`\n[${phase}] Chunk ${iteration} (${chunk.length} files | ~${estimatedChunksRemaining} chunks remaining)`));
     console.log(chalk.gray(`  ${this.dynamicChunker.getExplanation()}`));
 
@@ -575,6 +588,7 @@ export class Orchestrator {
     }
 
     let bugsFound = 0;
+    const chunkFindings: any[] = [];
 
     if (vulnerabilities.length > 0) {
       // POC Generation + Validation
@@ -642,6 +656,7 @@ export class Orchestrator {
         console.log(chalk.green(`    ✓ Collected ${allFindings.length} findings - ${validated} validated, ${unvalidated} unvalidated, ${noPOC} no POC`));
       }
       bugsFound = allFindings.length;
+      chunkFindings.push(...allFindings);
       const newTotalBugsFound = totalBugsFound + bugsFound;
 
       // Report Generation - REPORT EVERYTHING
@@ -749,7 +764,7 @@ export class Orchestrator {
       `  Next chunk: ${nextSize} files (${this.dynamicChunker.getExplanation()})`
     ));
 
-    return { bugsFound };
+    return { bugsFound, findings: chunkFindings };
   }
 
   /**

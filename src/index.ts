@@ -65,6 +65,8 @@ program
   .option('-c, --config <path>', 'Path to config file', '.sandyaa/config.yaml')
   .option('--fresh', 'Start fresh analysis, ignore existing checkpoint')
   .option('--sarif', 'Generate a SARIF 2.1.0 report alongside Markdown output (for TrustSource / SAST tooling)')
+  .option('--ts-upload <module>', 'Upload SARIF to TrustSource (module name or UUID). Implies --sarif. Requires TRUSTSOURCE_API_KEY env var.')
+  .option('--ts-project <project>', 'TrustSource project name (used with --ts-upload for auto-creation of the module within the project)')
   .option(
     '-m, --model <tier>',
     'Pin every Claude task to a specific model (haiku|sonnet|opus). ' +
@@ -82,6 +84,12 @@ program
         console.log(chalk.gray('Examples:'));
         console.log(chalk.gray('  sandyaa /path/to/project'));
         console.log(chalk.gray('  sandyaa https://github.com/user/repo.git'));
+        process.exit(1);
+      }
+
+      // Validate TRUSTSOURCE_API_KEY early so the user gets immediate feedback.
+      if (options.tsUpload && !process.env.TRUSTSOURCE_API_KEY) {
+        console.error(chalk.red('Error: TRUSTSOURCE_API_KEY environment variable is required when using --ts-upload'));
         process.exit(1);
       }
 
@@ -129,7 +137,7 @@ program
       ClaudeExecutor.setGlobalTargetPath(targetResolved);
 
       const orchestrator = new Orchestrator(config);
-      await orchestrator.run(options.fresh, options.sarif ?? false);
+      await orchestrator.run(options.fresh, options.sarif ?? false, options.tsUpload, options.tsProject);
 
     } catch (error) {
       console.error(chalk.red('Error:'), error);

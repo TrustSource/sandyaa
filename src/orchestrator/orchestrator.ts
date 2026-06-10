@@ -164,7 +164,7 @@ export class Orchestrator {
     return path.join(checkpointDir, `checkpoint-${hash}.json`);
   }
 
-  async run(startFresh: boolean = false, sarif: boolean = false): Promise<void> {
+  async run(startFresh: boolean = false, sarif: boolean = false, tsUpload?: string, tsProject?: string): Promise<void> {
     const startTime = Date.now();
     let totalBugsFound = 0;
 
@@ -210,7 +210,7 @@ export class Orchestrator {
     this.checkpoint = new Checkpoint(checkpointFile);
     this.reporter = new Reporter(this.config, targetPath);
     this.detector = new VulnerabilityDetector(this.config, targetPath);
-    if (sarif) {
+    if (sarif || tsUpload) {
       this.sarifReporter = new SarifReporter(this.config, targetPath);
     }
 
@@ -411,6 +411,16 @@ export class Orchestrator {
     // Generate SARIF report if requested
     if (this.sarifReporter) {
       await this.sarifReporter.generate(allVulnerabilities);
+
+      // Upload to TrustSource if --ts-upload was given
+      if (tsUpload) {
+        try {
+          await this.sarifReporter.upload(tsUpload, tsProject);
+        } catch (error) {
+          console.error(chalk.red('TrustSource upload failed:'), error instanceof Error ? error.message : String(error));
+          console.log(chalk.yellow('The local SARIF file is still available in the findings directory.'));
+        }
+      }
     }
 
     // Generate summary report

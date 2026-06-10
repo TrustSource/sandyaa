@@ -174,6 +174,44 @@ For on-prem TrustSource installations, set `TRUSTSOURCE_BASE_URL` to override th
 
 The SARIF file uses paths relative to the scan root, matches SARIF schema version `2.1.0`, and includes Sandyaa-specific fields (exploitability score, verification status, blast radius, etc.) in the `properties` bag of each result.
 
+## Claude Code Skill
+
+Sandyaa can be used as a [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills), so you can run security scans directly from a Claude Code session with `/security-scan`.
+
+### Installation
+
+Copy the skill into your Claude Code skills directory:
+
+```bash
+mkdir -p ~/.claude/skills/security-scan
+cp docs/skills/security-scan.md ~/.claude/skills/security-scan/SKILL.md
+```
+
+### Usage
+
+Once installed, Claude Code recognizes the skill automatically. You can invoke it with:
+
+- `/security-scan` — Claude will ask what to scan
+- "Scan this project for security vulnerabilities"
+- "Run a security analysis of /path/to/project"
+- "Run Sandyaa with SARIF output against my-service"
+- "Scan this repo and upload findings to TrustSource module my-module"
+
+Claude handles the full workflow: runs the scan in the background, waits for completion, reads the findings, and presents a structured summary. You can then ask follow-up questions about specific findings.
+
+### What the skill does
+
+1. Resolves the target path and scan options from your request
+2. Validates prerequisites (Sandyaa installed, API keys set if uploading)
+3. Runs `sandyaa` with the appropriate flags in the background
+4. Reads the scan output and findings manifest when complete
+5. Presents a summary table with severity counts, verification status, and top findings
+6. Offers to show detailed analysis for specific findings
+
+### Customization
+
+The skill file at `~/.claude/skills/security-scan/SKILL.md` is plain Markdown — you can edit it to change defaults, add project-specific scan profiles, or adjust the summary format.
+
 ## Share your CVEs
 
 If Sandyaa helped you find a bug that was assigned a CVE, we'd like to know. Open a PR adding an entry to `CVES.md` (or a GitHub issue if you prefer) with:

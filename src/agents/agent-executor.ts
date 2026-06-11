@@ -1683,9 +1683,12 @@ Return JSON only:
 
     const examples = selectPocExamples(vulnerability.type ?? '');
     const examplesSection = examples.length > 0
-      ? `## Reference examples\n\n${examples.map((e, i) =>
-          `### Example ${i + 1} (${e.language})\n\`\`\`json\n${JSON.stringify(e, null, 2)}\n\`\`\``
-        ).join('\n\n')}`
+      // Omit `validated` — it is a runtime sentinel set by the validation step, not a value
+      // the model should copy literally from examples.
+      ? `## Reference examples\n\n${examples.map((e, i) => {
+          const { validated: _omit, ...exampleData } = e;
+          return `### Example ${i + 1} (${e.language})\n\`\`\`json\n${JSON.stringify(exampleData, null, 2)}\n\`\`\``;
+        }).join('\n\n')}`
       : '';
 
     return `Generate a security test case for the following vulnerability.

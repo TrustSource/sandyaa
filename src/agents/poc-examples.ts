@@ -273,7 +273,8 @@ echo "$RESPONSE" | grep -q 'root:x:0:0' \\
  * results are capped by `maxCount`, so at most that many entries are returned.
  *
  * Returns an empty array when no category matches — irrelevant examples degrade model
- * output quality more than providing no examples at all.
+ * output quality more than providing no examples at all. Logs a warning in that case
+ * so degraded prompts are observable in production.
  */
 export function selectPocExamples(vulnType: string, maxCount = 2): readonly PocOutput[] {
   const normalised = vulnType.toLowerCase().replace(/[\s_]/g, '-');
@@ -286,5 +287,8 @@ export function selectPocExamples(vulnType: string, maxCount = 2): readonly PocO
     }
   }
 
+  if (matched.length === 0) {
+    console.warn(`[poc-examples] No matching examples for vulnerability type "${vulnType}" — prompt will have no examples`);
+  }
   return matched;
 }

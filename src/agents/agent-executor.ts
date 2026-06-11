@@ -1680,9 +1680,9 @@ Return JSON only:
 
     const examples = selectPocExamples(vulnerability.type || '', 2);
     const examplesSection = examples.length > 0
-      ? `## Examples\nThe following examples illustrate the expected output format:\n\n${examples.map(e => {
+      ? `## Examples\nThe following examples illustrate the expected output format:\n\n${examples.map((e, i) => {
           const { validated: _omit, ...exampleData } = e.example;
-          return '```json\n' + JSON.stringify(exampleData, null, 2) + '\n```';
+          return `### Example ${i + 1} (${e.example.language})\n\`\`\`json\n${JSON.stringify(exampleData, null, 2)}\n\`\`\``;
         }).join('\n\n')}\n`
       : '';
 

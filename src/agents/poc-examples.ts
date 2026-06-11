@@ -122,6 +122,7 @@ export const POC_EXAMPLES: PocExample[] = [
  * Select up to maxCount examples whose categories overlap with the vulnerability type.
  * Returns an empty array when no category matches — irrelevant examples degrade model
  * output quality more than providing no examples at all.
+ * Emits a warning when no category matches so degraded prompts are observable in production.
  */
 export function selectPocExamples(vulnType: string, maxCount: number): PocExample[] {
   const normalised = vulnType.toLowerCase().replace(/[\s_]/g, '-');

@@ -32,7 +32,13 @@ export class RecursiveStrategyEngine {
 
   async apply(
     vulnerabilities: Vulnerability[],
-    context: CodeContext
+    context: CodeContext,
+    options?: {
+      /** Findings already verified in a prior run — skip re-verification for these. */
+      alreadyVerified?: Map<string, any>;
+      /** Called after each finding is verified; use to append scan-log entries. */
+      onFindingVerified?: (id: string, result: any) => Promise<void>;
+    }
   ): Promise<EnhancedVulnerability[]> {
     if (!this.config.enabled) {
       return vulnerabilities.map(v => ({ ...v, recursive: null }));
@@ -41,6 +47,21 @@ export class RecursiveStrategyEngine {
     const enhanced: EnhancedVulnerability[] = [];
 
     for (const vuln of vulnerabilities) {
+      // Restore from scan log if this finding was already verified in a prior run
+      const savedVerify = options?.alreadyVerified?.get(vuln.id);
+      if (savedVerify) {
+        console.log(`  Recursive analysis: ${vuln.id} (restored from scan log)`);
+        enhanced.push({
+          ...vuln,
+          recursive: null,
+          verificationStatus: savedVerify.status ?? 'verified',
+          confidence: savedVerify.confidence ?? 'high',
+          needsManualReview: savedVerify.needsManualReview ?? false,
+          contradictions: savedVerify.contradictions,
+        });
+        continue;
+      }
+
       console.log(`  Recursive analysis: ${vuln.id}`);
 
       let recursiveData: RecursiveAnalysis | null = null;
@@ -136,14 +157,25 @@ export class RecursiveStrategyEngine {
       const passedExploitabilityChecks = exploitabilityProof.filter(p => p.startsWith('✓')).length;
       const totalExploitabilityChecks = 5; // 5 validations
 
+      const derivedConfidence = verificationStatus === 'verified' ? 'high'
+        : verificationStatus === 'uncertain' ? 'medium' : 'low';
+
+      if (options?.onFindingVerified) {
+        await options.onFindingVerified(vuln.id, {
+          status: verificationStatus,
+          confidence: derivedConfidence,
+          needsManualReview: verificationStatus !== 'verified',
+          contradictions: contradictions.length > 0 ? contradictions : undefined,
+        });
+      }
+
       enhanced.push({
         ...vuln,
         poc: refinedPOC,
         recursive: recursiveData,
         verificationStatus,
         contradictions: contradictions.length > 0 ? contradictions : undefined,
-        confidence: verificationStatus === 'verified' ? 'high' :
-                   verificationStatus === 'uncertain' ? 'medium' : 'low',
+        confidence: derivedConfidence,
         needsManualReview: verificationStatus !== 'verified',
         // GOD-LEVEL: Add recursive exploitability proof
         recursiveExploitabilityProof: exploitabilityProof.length > 0 ? {

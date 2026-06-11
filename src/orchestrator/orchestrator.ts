@@ -4,6 +4,7 @@ import { POCGenerator } from '../poc-gen/poc-generator.js';
 import { Reporter } from '../reporter/reporter.js';
 import { SarifReporter } from '../reporter/sarif-reporter.js';
 import { Checkpoint } from '../utils/checkpoint.js';
+import { ScanLog, ScanState } from '../utils/scan-log.js';
 import { FileScanner } from '../utils/file-scanner.js';
 import { RecursiveStrategyEngine } from '../recursive/recursive-strategy.js';
 import { GitHelper } from '../utils/git-helper.js';
@@ -107,6 +108,7 @@ export interface Config {
 export class Orchestrator {
   private config: Config;
   private checkpoint: Checkpoint;
+  private scanLog: ScanLog;
   private analyzer: ContextAnalyzer;
   private detector: VulnerabilityDetector;
   private pocGen: POCGenerator;
@@ -127,8 +129,9 @@ export class Orchestrator {
 
   constructor(config: Config) {
     this.config = config;
-    // Checkpoint, Reporter, and Detector will be initialized in run() with target-specific path
+    // Checkpoint, ScanLog, Reporter, and Detector will be initialized in run() with target-specific path
     this.checkpoint = null as any; // Temporary, will be set in run()
+    this.scanLog = null as any;    // Temporary, will be set in run()
     this.reporter = null as any; // Temporary, will be set in run()
     this.detector = null as any; // Temporary, will be set in run()
     this.analyzer = new ContextAnalyzer(config);
@@ -154,14 +157,17 @@ export class Orchestrator {
     this.dashboard = new DashboardRenderer();
   }
 
+  private getSandyaaDir(): string {
+    return path.dirname(this.config.output.checkpoint_file);
+  }
+
   private getCheckpointFile(targetPath: string): string {
     // Create unique checkpoint file for each project (based on absolute path hash)
     const hash = crypto.createHash('sha256')
       .update(path.resolve(targetPath))
       .digest('hex')
       .substring(0, 12);
-    const checkpointDir = path.dirname(this.config.output.checkpoint_file);
-    return path.join(checkpointDir, `checkpoint-${hash}.json`);
+    return path.join(this.getSandyaaDir(), `checkpoint-${hash}.json`);
   }
 
   async run(startFresh: boolean = false, sarif: boolean = false, tsUpload?: string, tsProject?: string): Promise<void> {
@@ -205,9 +211,10 @@ export class Orchestrator {
       executor.setTargetPath(resolvedTarget);
     }
 
-    // Initialize project-specific checkpoint, reporter, and detector (after we know final target path)
+    // Initialize project-specific checkpoint, scan log, reporter, and detector
     const checkpointFile = this.getCheckpointFile(targetPath);
     this.checkpoint = new Checkpoint(checkpointFile);
+    this.scanLog = new ScanLog(ScanLog.getLogFile(targetPath, this.getSandyaaDir()));
     this.reporter = new Reporter(this.config, targetPath);
     this.detector = new VulnerabilityDetector(this.config, targetPath);
     if (sarif || tsUpload) {
@@ -228,12 +235,20 @@ export class Orchestrator {
 
     // Check for existing checkpoint and ask user
     let processedFiles = new Set<string>();
+    let scanState: ScanState = {
+      prioritizedFiles: null,
+      detectedChunks: new Map(),
+      verifiedFindings: new Map(),
+      pocResults: new Map(),
+      sarifWritten: false,
+    };
     const checkpointData = await this.checkpoint.loadForTarget(targetPath);
 
     if (startFresh) {
       // User explicitly wants fresh start
       if (checkpointData && checkpointData.processedFiles.length > 0) {
         await this.checkpoint.clear();
+        await this.scanLog.clear();
         console.log(chalk.green('Starting fresh analysis (checkpoint cleared)...\n'));
       }
     } else if (checkpointData && checkpointData.processedFiles.length > 0) {
@@ -263,9 +278,14 @@ export class Orchestrator {
       if (shouldResume) {
         processedFiles = new Set(checkpointData.processedFiles);
         totalBugsFound = checkpointData.totalBugsFound;
+        scanState = await this.scanLog.loadState();
         console.log(chalk.green('Resuming from checkpoint...\n'));
+        if (scanState.detectedChunks.size > 0) {
+          console.log(chalk.gray(`    Scan log: ${scanState.detectedChunks.size} chunks with cached detection, ${scanState.verifiedFindings.size} verified findings, ${scanState.pocResults.size} POCs`));
+        }
       } else {
         await this.checkpoint.clear();
+        await this.scanLog.clear();
         console.log(chalk.green('Starting fresh analysis...\n'));
       }
     }
@@ -297,16 +317,27 @@ export class Orchestrator {
     let phaseStart = 0;
 
     if (filesToProcess.length > 1000 && processedFiles.size === 0) {
-      const prioritizer = new FilePrioritizer(targetPath, this.config.provider);
-      const prioritized = await prioritizer.prioritize(filesToProcess, {
-        phase: 'high-value',
-        samplingRate: 0.1,
-        focusAreas: []
-      });
+      // Re-use saved prioritization from the scan log if available (skips AI call)
+      if (scanState.prioritizedFiles && scanState.prioritizedFiles.length > 0) {
+        prioritizedFiles = scanState.prioritizedFiles;
+        console.log(chalk.gray(`    Restored prioritized file list from scan log (${prioritizedFiles.length} files)`));
+      } else {
+        const prioritizer = new FilePrioritizer(targetPath, this.config.provider);
+        const prioritized = await prioritizer.prioritize(filesToProcess, {
+          phase: 'high-value',
+          samplingRate: 0.1,
+          focusAreas: []
+        });
 
-      prioritizedFiles = prioritized
-        .sort((a: any, b: any) => b.priority - a.priority)
-        .map((p: any) => p.path);
+        prioritizedFiles = prioritized
+          .sort((a: any, b: any) => b.priority - a.priority)
+          .map((p: any) => p.path);
+
+        await this.scanLog.append({
+          step: 'prioritize',
+          result: { high_priority_count: prioritizedFiles.length, files: prioritizedFiles },
+        });
+      }
 
       // Phase 1: Analyze prioritized targets only
       filesToProcess = prioritizedFiles;
@@ -316,10 +347,41 @@ export class Orchestrator {
       console.log(chalk.cyan(`Phase 2: Systematic coverage (${filesToProcess.length} files remaining)\n`));
     }
 
+    // Restore allVulnerabilities for chunks already completed in a prior run.
+    // This ensures the final SARIF report is complete even on a resumed scan.
+    //
+    // Guard: only apply verifiedFindings/pocResults whose finding IDs are present
+    // in the current chunk's findings.  A prior run may have detected finding B,
+    // but a re-detection after a code change only produced finding A — B's verify/poc
+    // entries must not bleed into this run's output as ghost findings.
+    const allVulnerabilities: any[] = [];
+    for (const [, chunkData] of scanState.detectedChunks) {
+      const allFilesProcessed = chunkData.files.every(f => processedFiles.has(f));
+      if (!allFilesProcessed) continue;  // Will be (re-)processed in the main loop below
+      const currentFindingIds = new Set(chunkData.findings.map((f: any) => f.id));
+      for (const finding of chunkData.findings) {
+        const enriched = { ...finding };
+        const verifyResult = scanState.verifiedFindings.get(finding.id);
+        if (verifyResult && currentFindingIds.has(finding.id)) {
+          enriched.verificationStatus = verifyResult.status;
+          enriched.confidence = verifyResult.confidence;
+          enriched.needsManualReview = verifyResult.needsManualReview;
+          if (verifyResult.contradictions) enriched.contradictions = verifyResult.contradictions;
+        }
+        const pocResult = scanState.pocResults.get(finding.id);
+        if (pocResult?.poc && currentFindingIds.has(finding.id)) {
+          enriched.poc = { ...pocResult.poc };
+        }
+        allVulnerabilities.push(enriched);
+      }
+    }
+    if (allVulnerabilities.length > 0) {
+      console.log(chalk.gray(`    Restored ${allVulnerabilities.length} findings from scan log for prior-run chunks`));
+    }
+
     // Process files in dynamic chunks (adapts based on complexity)
     let iteration = 0;
     let i = 0;
-    const allVulnerabilities: any[] = [];
 
     while (i < filesToProcess.length) {
       iteration++;
@@ -330,7 +392,7 @@ export class Orchestrator {
 
       const { bugsFound, findings } = await this.processChunk(
         chunk, iteration, phase, targetPath, processedFiles, totalBugsFound,
-        estimatedChunksRemaining, files.length
+        estimatedChunksRemaining, files.length, scanState
       );
       totalBugsFound += bugsFound;
       allVulnerabilities.push(...findings);
@@ -375,7 +437,7 @@ export class Orchestrator {
 
             const { bugsFound, findings } = await this.processChunk(
               chunk, iteration, 'systematic', targetPath, processedFiles, totalBugsFound,
-              estimatedChunksRemaining, files.length
+              estimatedChunksRemaining, files.length, scanState
             );
             totalBugsFound += bugsFound;
             allVulnerabilities.push(...findings);
@@ -409,8 +471,9 @@ export class Orchestrator {
     }
 
     // Generate SARIF report if requested
-    if (this.sarifReporter) {
+    if (this.sarifReporter && !scanState.sarifWritten) {
       await this.sarifReporter.generate(allVulnerabilities);
+      await this.scanLog.append({ step: 'sarif', result: { written: true } });
 
       // Upload to TrustSource if --ts-upload was given
       if (tsUpload) {
@@ -421,6 +484,8 @@ export class Orchestrator {
           console.log(chalk.yellow('The local SARIF file is still available in the findings directory.'));
         }
       }
+    } else if (this.sarifReporter && scanState.sarifWritten) {
+      console.log(chalk.gray('SARIF already written in a prior run — skipping duplicate generation.'));
     }
 
     // Generate summary report
@@ -451,7 +516,8 @@ export class Orchestrator {
     processedFiles: Set<string>,
     totalBugsFound: number,
     estimatedChunksRemaining: number,
-    totalFilesCount: number
+    totalFilesCount: number,
+    scanState: ScanState
   ): Promise<{ bugsFound: number; findings: any[] }> {
     console.log(chalk.bold(`\n[${phase}] Chunk ${iteration} (${chunk.length} files | ~${estimatedChunksRemaining} chunks remaining)`));
     console.log(chalk.gray(`  ${this.dynamicChunker.getExplanation()}`));
@@ -484,40 +550,55 @@ export class Orchestrator {
       `${contextTokens.toLocaleString()} tokens (${contextWindowPercent}% of ${(getDefaultContextWindow() / 1000).toFixed(0)}k)`
     ));
 
-    // Vulnerability Detection
-    console.log(chalk.cyan(`\n  → Vulnerability detection: correlating findings and analyzing exploitability...`));
-    const detectionStartTokens = this.totalTokensUsed;
-    let vulnerabilities = await this.detector.detect(context);
-    const detectionTokens = this.totalTokensUsed - detectionStartTokens;
+    // Vulnerability Detection — use scan log cache if this chunk was already detected
+    let vulnerabilities: any[] = [];
+    let detectionTokens = 0;
+    const chunkKey = ScanLog.chunkKey(chunk);
+    const cachedDetect = scanState.detectedChunks.get(chunkKey);
 
-    // Update dashboard with detection results
-    this.dashboard.update({
-      phase: 'vulnerability-detection',
-      tokensUsed: this.totalTokensUsed,
-    });
-
-    if (vulnerabilities.length > 0) {
-      console.log(chalk.green(`    ✓ Found ${vulnerabilities.length} potential vulnerabilities | ${detectionTokens.toLocaleString()} tokens`));
-
-      // Feed findings to dashboard
-      for (const v of vulnerabilities) {
-        const sev = (v.severity?.toLowerCase() || 'low') as 'critical' | 'high' | 'medium' | 'low';
-        this.dashboard.addFinding(sev, `${v.type} at ${v.location?.file?.split('/').pop() || 'unknown'}`);
-      }
-
-      // Show sample of what was found (Claude decides what's important)
-      const sample = vulnerabilities.slice(0, 3);
-      for (const vuln of sample) {
-        const severity = vuln.severity?.toUpperCase() || 'UNKNOWN';
-        const severityColor = ['critical', 'high'].includes(vuln.severity?.toLowerCase() || '') ? chalk.red : chalk.yellow;
-        const attackerNote = vuln.attackerControlled?.isControlled ? 'VERIFIED ' : '';
-        console.log(severityColor(`      ${attackerNote}[${severity}] ${vuln.type} at ${vuln.location.file.split('/').pop()}:${vuln.location.line}`));
-      }
-      if (vulnerabilities.length > 3) {
-        console.log(chalk.gray(`      ... and ${vulnerabilities.length - 3} more`));
-      }
+    if (cachedDetect) {
+      vulnerabilities = cachedDetect.findings;
+      console.log(chalk.gray(`\n  → Vulnerability detection: restored ${vulnerabilities.length} finding(s) from scan log (chunk already detected)`));
+      this.dashboard.update({ phase: 'vulnerability-detection', tokensUsed: this.totalTokensUsed });
     } else {
-      console.log(chalk.gray(`    ✓ No vulnerabilities in this chunk | ${detectionTokens.toLocaleString()} tokens`));
+      console.log(chalk.cyan(`\n  → Vulnerability detection: correlating findings and analyzing exploitability...`));
+      const detectionStartTokens = this.totalTokensUsed;
+      vulnerabilities = await this.detector.detect(context);
+      detectionTokens = this.totalTokensUsed - detectionStartTokens;
+
+      // Persist detection result to scan log immediately (before recursive verification)
+      await this.scanLog.append({
+        step: 'detect',
+        chunk: iteration,
+        files: chunk,
+        result: { findings: vulnerabilities },
+      });
+
+      this.dashboard.update({ phase: 'vulnerability-detection', tokensUsed: this.totalTokensUsed });
+
+      if (vulnerabilities.length > 0) {
+        console.log(chalk.green(`    ✓ Found ${vulnerabilities.length} potential vulnerabilities | ${detectionTokens.toLocaleString()} tokens`));
+
+        // Feed findings to dashboard
+        for (const v of vulnerabilities) {
+          const sev = (v.severity?.toLowerCase() || 'low') as 'critical' | 'high' | 'medium' | 'low';
+          this.dashboard.addFinding(sev, `${v.type} at ${v.location?.file?.split('/').pop() || 'unknown'}`);
+        }
+
+        // Show sample of what was found
+        const sample = vulnerabilities.slice(0, 3);
+        for (const vuln of sample) {
+          const severity = vuln.severity?.toUpperCase() || 'UNKNOWN';
+          const severityColor = ['critical', 'high'].includes(vuln.severity?.toLowerCase() || '') ? chalk.red : chalk.yellow;
+          const attackerNote = vuln.attackerControlled?.isControlled ? 'VERIFIED ' : '';
+          console.log(severityColor(`      ${attackerNote}[${severity}] ${vuln.type} at ${vuln.location.file.split('/').pop()}:${vuln.location.line}`));
+        }
+        if (vulnerabilities.length > 3) {
+          console.log(chalk.gray(`      ... and ${vulnerabilities.length - 3} more`));
+        }
+      } else {
+        console.log(chalk.gray(`    ✓ No vulnerabilities in this chunk | ${detectionTokens.toLocaleString()} tokens`));
+      }
     }
 
     // Recursive Analysis (if enabled)
@@ -525,7 +606,12 @@ export class Orchestrator {
       this.dashboard.update({ phase: 'validation' });
       console.log(chalk.cyan(`\n  → Recursive verification: tracing call chains, checking contradictions...`));
       const recursiveStartTokens = this.totalTokensUsed;
-      const enhanced = await this.recursiveEngine.apply(vulnerabilities, context);
+      const enhanced = await this.recursiveEngine.apply(vulnerabilities, context, {
+        alreadyVerified: scanState.verifiedFindings,
+        onFindingVerified: async (id: string, result: any) => {
+          await this.scanLog.append({ step: 'verify', finding_id: id, result });
+        },
+      });
       const recursiveTokens = this.totalTokensUsed - recursiveStartTokens;
 
       // Count verification statuses instead of filtering
@@ -610,42 +696,71 @@ export class Orchestrator {
         const vuln = vulnerabilities[vi];
 
         if (this.config.poc.generate) {
-          try {
-            process.stdout.write(chalk.hex('#FF8C00')(`\r    ⚡ POC ${vi + 1}/${vulnerabilities.length}: Generating for ${vuln.id}...`));
-            const poc = await this.pocGen.generate(vuln, context);
+          // Restore POC from scan log if this finding was already handled in a prior run
+          const savedPoc = scanState.pocResults.get(vuln.id);
+          if (savedPoc) {
+            if (savedPoc.poc) {
+              vuln.poc = savedPoc.poc;
+            }
+            if (savedPoc.needsManualReview) {
+              vuln.needsManualReview = true;
+            }
+            process.stdout.write('\r' + ' '.repeat(100) + '\r');
+            console.log(chalk.gray(`      ${vuln.id}: POC restored from scan log (${savedPoc.status})`));
+          } else {
+            try {
+              process.stdout.write(chalk.hex('#FF8C00')(`\r    ⚡ POC ${vi + 1}/${vulnerabilities.length}: Generating for ${vuln.id}...`));
+              const poc = await this.pocGen.generate(vuln, context);
 
-            // Anti-hallucination: Validate POC actually works
-            if (this.config.poc.validate) {
-              process.stdout.write(chalk.hex('#FF8C00')(`\r    ⚡ POC ${vi + 1}/${vulnerabilities.length}: Validating ${vuln.id}...          `));
-              const isValid = await this.pocGen.validate(poc);
-              if (isValid) {
-                vuln.poc = poc;
-                vuln.poc.validated = true;
-                process.stdout.write('\r' + ' '.repeat(100) + '\r');
-                console.log(chalk.green(`      ✓ ${vuln.id}: POC validated`));
+              // Anti-hallucination: Validate POC actually works
+              if (this.config.poc.validate) {
+                process.stdout.write(chalk.hex('#FF8C00')(`\r    ⚡ POC ${vi + 1}/${vulnerabilities.length}: Validating ${vuln.id}...          `));
+                const isValid = await this.pocGen.validate(poc);
+                if (isValid) {
+                  vuln.poc = poc;
+                  vuln.poc.validated = true;
+                  process.stdout.write('\r' + ' '.repeat(100) + '\r');
+                  console.log(chalk.green(`      ✓ ${vuln.id}: POC validated`));
+                  await this.scanLog.append({
+                    step: 'poc', finding_id: vuln.id,
+                    result: { status: 'success', poc: vuln.poc, validated: true },
+                  });
+                } else {
+                  // POC didn't work - KEEP THE FINDING but mark it
+                  vuln.poc = poc;
+                  vuln.poc.validated = false;
+                  vuln.needsManualReview = true;
+                  if (!vuln.verificationStatus) {
+                    vuln.verificationStatus = 'unverified';
+                  }
+                  process.stdout.write('\r' + ' '.repeat(100) + '\r');
+                  console.log(chalk.yellow(`      ⚠ ${vuln.id}: POC validation failed - marked for manual review`));
+                  await this.scanLog.append({
+                    step: 'poc', finding_id: vuln.id,
+                    result: { status: 'failed', poc: vuln.poc, validated: false, needsManualReview: true },
+                  });
+                }
               } else {
-                // POC didn't work - KEEP THE FINDING but mark it
+                // Validation skipped
                 vuln.poc = poc;
                 vuln.poc.validated = false;
-                vuln.needsManualReview = true;
-                if (!vuln.verificationStatus) {
-                  vuln.verificationStatus = 'unverified';
-                }
                 process.stdout.write('\r' + ' '.repeat(100) + '\r');
-                console.log(chalk.yellow(`      ⚠ ${vuln.id}: POC validation failed - marked for manual review`));
+                console.log(chalk.gray(`      ${vuln.id}: POC generated (validation skipped)`));
+                await this.scanLog.append({
+                  step: 'poc', finding_id: vuln.id,
+                  result: { status: 'skipped', poc: vuln.poc },
+                });
               }
-            } else {
-              // Validation skipped
-              vuln.poc = poc;
-              vuln.poc.validated = false;
+            } catch (error) {
+              // POC generation failed - STILL KEEP THE FINDING
               process.stdout.write('\r' + ' '.repeat(100) + '\r');
-              console.log(chalk.gray(`      ${vuln.id}: POC generated (validation skipped)`));
+              console.log(chalk.yellow(`      ⚠ ${vuln.id}: POC generation failed, reported without POC`));
+              vuln.needsManualReview = true;
+              await this.scanLog.append({
+                step: 'poc', finding_id: vuln.id,
+                result: { status: 'error', needsManualReview: true },
+              });
             }
-          } catch (error) {
-            // POC generation failed - STILL KEEP THE FINDING
-            process.stdout.write('\r' + ' '.repeat(100) + '\r');
-            console.log(chalk.yellow(`      ⚠ ${vuln.id}: POC generation failed, reported without POC`));
-            vuln.needsManualReview = true;
           }
         }
 

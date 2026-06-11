@@ -9,6 +9,7 @@ import { PathResolver } from '../utils/path-resolver.js';
 import { LightweightCodeFilter } from '../utils/code-filter.js';
 import * as fs from 'fs/promises';
 import { realpathSync } from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import chalk from 'chalk';
@@ -451,7 +452,11 @@ export class ContextAnalyzer {
     const STRATEGY_CONCURRENCY = (() => {
       const raw = parseInt(process.env.SANDYAA_STRATEGY_CONCURRENCY || '', 10);
       if (Number.isFinite(raw) && raw >= 1 && raw <= 8) return raw;
-      return 4;
+      // Scale with available CPUs: leave 2 threads for the orchestrator process.
+      // Clamp to [2, 8] so we stay aggressive on beefy machines but sane elsewhere.
+      // Guard against os.cpus() returning [] in restricted container environments.
+      const cpuCount = Math.max(1, os.cpus().length);
+      return Math.max(2, Math.min(8, cpuCount * 2 - 2));
     })();
 
     type StrategyOutcome = {

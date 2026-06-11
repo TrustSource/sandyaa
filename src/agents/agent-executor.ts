@@ -1706,7 +1706,7 @@ ${sourceCode || '// Source not available — generate test case from the vulnera
 Respond with ONLY a JSON object (no text before or after):
 \`\`\`json
 {
-  "language": "html|javascript|python|go|rust|c|cpp|bash|sql|http|curl",
+  "language": "html|javascript|python|go|rust|c|cpp|bash|sql|http",
   "code": "complete, runnable test case code",
   "setupInstructions": "numbered steps an independent tester can follow to run this test",
   "expectedImpact": "specific, observable outcome that confirms the vulnerability (not vague — e.g. 'alert(document.cookie) appears' not 'XSS may occur')",

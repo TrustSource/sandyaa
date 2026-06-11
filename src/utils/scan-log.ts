@@ -1,6 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import chalk from 'chalk';
 
 export type ScanLogStepName = 'prioritize' | 'detect' | 'verify' | 'poc' | 'sarif';
 
@@ -42,6 +43,14 @@ export interface ScanState {
  */
 export class ScanLog {
   private logFile: string;
+  private writeFailed = false;
+  private memState: ScanState = {
+    prioritizedFiles: null,
+    detectedChunks: new Map(),
+    verifiedFindings: new Map(),
+    pocResults: new Map(),
+    sarifWritten: false,
+  };
 
   constructor(logFile: string) {
     this.logFile = logFile;
@@ -57,19 +66,30 @@ export class ScanLog {
 
   /** Append one step entry.  Safe to call concurrently — each line is atomic. */
   async append(entry: Omit<ScanLogEntry, 'ts'>): Promise<void> {
+    const full: ScanLogEntry = { ...entry, ts: new Date().toISOString() } as ScanLogEntry;
+    this.applyToMemState(full);
     try {
       const dir = path.dirname(this.logFile);
       await fs.mkdir(dir, { recursive: true });
-      const line = JSON.stringify({ ...entry, ts: new Date().toISOString() }) + '\n';
+      const line = JSON.stringify(full) + '\n';
       await fs.appendFile(this.logFile, line, 'utf-8');
     } catch (error) {
-      console.warn('Failed to append to scan log:', error);
+      if (!this.writeFailed) {
+        this.writeFailed = true;
+        console.error(chalk.red(`[scan-log] Write failed — resume capability lost for this run: ${error}`));
+      }
     }
   }
 
-  /** Read all entries and materialise a resume-ready ScanState. */
+  /** Return the current in-memory state (updated on every append, no disk read). */
+  getState(): ScanState {
+    return this.memState;
+  }
+
+  /** Read all entries from disk and materialise a resume-ready ScanState.
+   *  Also populates the in-memory state so subsequent getState() calls are free. */
   async loadState(): Promise<ScanState> {
-    const state: ScanState = {
+    this.memState = {
       prioritizedFiles: null,
       detectedChunks: new Map(),
       verifiedFindings: new Map(),
@@ -84,33 +104,7 @@ export class ScanLog {
       for (const line of lines) {
         try {
           const entry: ScanLogEntry = JSON.parse(line);
-          switch (entry.step) {
-            case 'prioritize':
-              state.prioritizedFiles = entry.result?.files ?? null;
-              break;
-            case 'detect':
-              if (entry.files) {
-                const key = ScanLog.chunkKey(entry.files);
-                state.detectedChunks.set(key, {
-                  files: entry.files,
-                  findings: entry.result?.findings ?? [],
-                });
-              }
-              break;
-            case 'verify':
-              if (entry.finding_id) {
-                state.verifiedFindings.set(entry.finding_id, entry.result);
-              }
-              break;
-            case 'poc':
-              if (entry.finding_id) {
-                state.pocResults.set(entry.finding_id, entry.result);
-              }
-              break;
-            case 'sarif':
-              state.sarifWritten = entry.result?.written === true;
-              break;
-          }
+          this.applyToMemState(entry);
         } catch {
           // Skip malformed lines — partial writes don't corrupt prior entries
         }
@@ -119,12 +113,47 @@ export class ScanLog {
       // File doesn't exist yet
     }
 
-    return state;
+    return this.memState;
   }
 
-  /** Stable, order-independent key for a set of file paths. */
+  private applyToMemState(entry: ScanLogEntry): void {
+    switch (entry.step) {
+      case 'prioritize':
+        this.memState.prioritizedFiles = entry.result?.files ?? null;
+        break;
+      case 'detect':
+        if (entry.files) {
+          const key = ScanLog.chunkKey(entry.files);
+          this.memState.detectedChunks.set(key, {
+            files: entry.files,
+            findings: entry.result?.findings ?? [],
+          });
+        }
+        break;
+      case 'verify':
+        if (entry.finding_id) {
+          this.memState.verifiedFindings.set(entry.finding_id, entry.result);
+        }
+        break;
+      case 'poc':
+        if (entry.finding_id) {
+          this.memState.pocResults.set(entry.finding_id, entry.result);
+        }
+        break;
+      case 'sarif':
+        this.memState.sarifWritten = entry.result?.written === true;
+        break;
+    }
+  }
+
+  /** Stable, order-independent key for a set of file paths.
+   *  Normalises to absolute forward-slash paths so relative vs. absolute
+   *  and Windows vs. POSIX paths all produce the same key. */
   static chunkKey(files: string[]): string {
-    return [...files].sort().join('\0');
+    return [...files]
+      .map(f => path.resolve(f).split(path.sep).join('/'))
+      .sort()
+      .join('\0');
   }
 
   async exists(): Promise<boolean> {

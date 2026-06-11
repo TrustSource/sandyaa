@@ -349,21 +349,27 @@ export class Orchestrator {
 
     // Restore allVulnerabilities for chunks already completed in a prior run.
     // This ensures the final SARIF report is complete even on a resumed scan.
+    //
+    // Guard: only apply verifiedFindings/pocResults whose finding IDs are present
+    // in the current chunk's findings.  A prior run may have detected finding B,
+    // but a re-detection after a code change only produced finding A — B's verify/poc
+    // entries must not bleed into this run's output as ghost findings.
     const allVulnerabilities: any[] = [];
     for (const [, chunkData] of scanState.detectedChunks) {
       const allFilesProcessed = chunkData.files.every(f => processedFiles.has(f));
       if (!allFilesProcessed) continue;  // Will be (re-)processed in the main loop below
+      const currentFindingIds = new Set(chunkData.findings.map((f: any) => f.id));
       for (const finding of chunkData.findings) {
         const enriched = { ...finding };
         const verifyResult = scanState.verifiedFindings.get(finding.id);
-        if (verifyResult) {
+        if (verifyResult && currentFindingIds.has(finding.id)) {
           enriched.verificationStatus = verifyResult.status;
           enriched.confidence = verifyResult.confidence;
           enriched.needsManualReview = verifyResult.needsManualReview;
           if (verifyResult.contradictions) enriched.contradictions = verifyResult.contradictions;
         }
         const pocResult = scanState.pocResults.get(finding.id);
-        if (pocResult?.poc) {
+        if (pocResult?.poc && currentFindingIds.has(finding.id)) {
           enriched.poc = { ...pocResult.poc };
         }
         allVulnerabilities.push(enriched);
@@ -511,13 +517,7 @@ export class Orchestrator {
     totalBugsFound: number,
     estimatedChunksRemaining: number,
     totalFilesCount: number,
-    scanState: ScanState = {
-      prioritizedFiles: null,
-      detectedChunks: new Map(),
-      verifiedFindings: new Map(),
-      pocResults: new Map(),
-      sarifWritten: false,
-    }
+    scanState: ScanState
   ): Promise<{ bugsFound: number; findings: any[] }> {
     console.log(chalk.bold(`\n[${phase}] Chunk ${iteration} (${chunk.length} files | ~${estimatedChunksRemaining} chunks remaining)`));
     console.log(chalk.gray(`  ${this.dynamicChunker.getExplanation()}`));

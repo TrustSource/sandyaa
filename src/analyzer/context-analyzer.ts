@@ -454,7 +454,8 @@ export class ContextAnalyzer {
       if (Number.isFinite(raw) && raw >= 1 && raw <= 8) return raw;
       // Scale with available CPUs: leave 2 threads for the orchestrator process.
       // Clamp to [2, 8] so we stay aggressive on beefy machines but sane elsewhere.
-      const cpuCount = os.cpus().length;
+      // Guard against os.cpus() returning [] in restricted container environments.
+      const cpuCount = Math.max(1, os.cpus().length);
       return Math.max(2, Math.min(8, cpuCount * 2 - 2));
     })();
 

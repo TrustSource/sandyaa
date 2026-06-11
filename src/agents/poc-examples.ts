@@ -129,7 +129,7 @@ export function selectPocExamples(vulnType: string, maxCount: number): PocExampl
     e.categories.some(c => normalised.includes(c) || c.includes(normalised))
   );
   if (matched.length === 0) {
-    console.warn(`[poc-examples] No example matched vulnerability type "${vulnType}" — omitting examples from prompt`);
+    console.warn(`[poc-examples] No examples matched vulnerability type "${vulnType}" — omitting examples from prompt`);
     return [];
   }
   return matched.slice(0, maxCount);

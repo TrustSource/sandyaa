@@ -1674,62 +1674,69 @@ Return JSON only:
       }
     }
 
-    const deps = vulnerability.exploitationDependencies?.summary ||
-      (vulnerability.exploitationDependencies ? JSON.stringify(vulnerability.exploitationDependencies) : 'none specified');
-    const reachability = vulnerability.reachability || 'no conditions specified';
+    const deps = (vulnerability.exploitationDependencies?.description as string | undefined) ||
+      (vulnerability.exploitationDependencies?.prerequisites as string[] | undefined)?.join(', ') ||
+      'none specified';
+    const reachability = (vulnerability.reachability?.description as string | undefined) ||
+      (vulnerability.reachability as string | undefined) ||
+      'not specified';
 
-    const examples = selectPocExamples(vulnerability.type || '', 2);
+    const examples = selectPocExamples(vulnerability.type ?? '');
     const examplesSection = examples.length > 0
-      ? `## Examples\nThe following examples illustrate the expected output format:\n\n${examples.map(e =>
-          '```json\n' + JSON.stringify(e.example, null, 2) + '\n```'
-        ).join('\n\n')}\n`
+      ? `## Reference examples\n\n${examples.map((e, i) =>
+          `### Example ${i + 1} (${e.language})\n\`\`\`json\n${JSON.stringify(e, null, 2)}\n\`\`\``
+        ).join('\n\n')}`
       : '';
 
     return `Generate a security test case for the following vulnerability.
 
 The test case must be specific to the actual code — use exact function names,
-endpoints, parameters, and data types from the source. Do not use placeholder
-values.
+endpoints, parameters, and data types from the source. Do not use placeholder values.
 
 ## Vulnerability
+
 \`\`\`json
 ${JSON.stringify(vulnerability, null, 2)}
 \`\`\`
 
-## Source code context (${vulnerability.location?.file}:${vulnerability.location?.line})
+## Source code context
+
 \`\`\`${targetLanguage || 'text'}
-${sourceCode || '// Source not available — generate test case from the vulnerability description above'}
+${sourceCode || '// Source code not available — generate test case from the vulnerability description above'}
 \`\`\`
 
 ## Output format
-Respond with ONLY a JSON object (no text before or after):
+
+Respond with ONLY a JSON object (no text before or after). Schema:
+
 \`\`\`json
 {
-  "language": "html|javascript|python|go|rust|c|cpp|bash|sql|http|curl",
+  "language": "html|javascript|python|go|rust|c|cpp|bash|sql|http",
   "code": "complete, runnable test case code",
-  "setupInstructions": "numbered steps an independent tester can follow to run this test",
-  "expectedImpact": "specific, observable outcome that confirms the vulnerability (not vague — e.g. 'alert(document.cookie) appears' not 'XSS may occur')",
+  "setupInstructions": "step-by-step instructions a tester can follow",
+  "expectedImpact": "specific, observable outcome that confirms the vulnerability",
   "testSteps": [
-    "action and expected result",
-    "action and expected result",
-    "how to confirm the test succeeded"
+    "Step 1: action and expected result",
+    "Step 2: how to confirm the test case triggered the vulnerability"
   ],
   "prerequisitesHandled": {
-    "exploitationDependencies": "how the test satisfies each required dependency",
-    "reachability": "how the test reaches the vulnerable code path",
-    "attackChain": "summary of data flow from attacker input to impact"
+    "exploitationDependencies": "how the test case satisfies each dependency",
+    "reachability": "how the test case reaches the vulnerable code path",
+    "attackChain": "data flow from attacker input to the vulnerable point"
   },
   "validated": false
 }
 \`\`\`
 
 ## Guidelines
-- Trace data flow from attacker-controlled input to the vulnerable code path
-- Exploitation dependencies: ${deps}
-- Reachability conditions: ${reachability}
-- Use exact identifiers from the source: function names, endpoint paths, parameter names, types
-- Choose the language that matches the vulnerability type (HTML for browser bugs, Python/JS for web backends, C for memory-safety, Bash for command injection, etc.)
-- Setup instructions must be complete enough for a tester who has not seen the code before
+
+- Trace data flow from attacker input to the vulnerable code path
+- Address exploitation dependencies: ${deps}
+- Address reachability conditions: ${reachability}
+- Choose a test case language appropriate for the vulnerability type
+- Include complete setup instructions — assume the tester is unfamiliar with the codebase
+- Use exact identifiers from the code (function names, endpoint paths, parameter names)
+- Confirm each dependency and reachability condition in the prerequisitesHandled fields
 
 ${examplesSection}`;
   }
